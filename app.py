@@ -1722,6 +1722,132 @@ input[type="range"] {
   text-transform: none !important;
   color: var(--line-color) !important;
 }
+
+/* Looks thumbs — inverted rainbow labels (violet→red) over gray depth */
+:root {
+  --look-ledger: #6b2d9b;
+  --look-magma: #3d5ae8;
+  --look-punchy: #1a9fd4;
+  --look-soft: #1f9a4a;
+  --look-portrait: #c9a000;
+  --look-sockets: #e07010;
+  --look-scenery: #d62828;
+}
+
+.gradio-container .look-thumb {
+  box-shadow: 4px 4px 0 rgba(0,0,0,0.18) !important;
+}
+.gradio-container .look-thumb .block-label,
+.gradio-container .look-thumb span.block-info,
+.gradio-container .look-thumb .label-wrap,
+.gradio-container .look-thumb label,
+.gradio-container .look-thumb .block-title {
+  font-size: 0.7rem !important;
+  font-weight: bold !important;
+  letter-spacing: 0.02em !important;
+  padding: 3px 8px !important;
+  opacity: 1 !important;
+  border: 1px solid #111111 !important;
+  text-shadow: none !important;
+}
+
+.gradio-container .look-ledger {
+  border-color: var(--look-ledger) !important;
+  border-width: 2px !important;
+}
+.gradio-container .look-ledger .block-label,
+.gradio-container .look-ledger span.block-info,
+.gradio-container .look-ledger .label-wrap,
+.gradio-container .look-ledger label,
+.gradio-container .look-ledger .block-title {
+  background: var(--look-ledger) !important;
+  color: #ffffff !important;
+  border-color: var(--look-ledger) !important;
+}
+
+.gradio-container .look-magma {
+  border-color: var(--look-magma) !important;
+  border-width: 2px !important;
+}
+.gradio-container .look-magma .block-label,
+.gradio-container .look-magma span.block-info,
+.gradio-container .look-magma .label-wrap,
+.gradio-container .look-magma label,
+.gradio-container .look-magma .block-title {
+  background: var(--look-magma) !important;
+  color: #ffffff !important;
+  border-color: var(--look-magma) !important;
+}
+
+.gradio-container .look-punchy {
+  border-color: var(--look-punchy) !important;
+  border-width: 2px !important;
+}
+.gradio-container .look-punchy .block-label,
+.gradio-container .look-punchy span.block-info,
+.gradio-container .look-punchy .label-wrap,
+.gradio-container .look-punchy label,
+.gradio-container .look-punchy .block-title {
+  background: var(--look-punchy) !important;
+  color: #111111 !important;
+  border-color: var(--look-punchy) !important;
+}
+
+.gradio-container .look-soft {
+  border-color: var(--look-soft) !important;
+  border-width: 2px !important;
+}
+.gradio-container .look-soft .block-label,
+.gradio-container .look-soft span.block-info,
+.gradio-container .look-soft .label-wrap,
+.gradio-container .look-soft label,
+.gradio-container .look-soft .block-title {
+  background: var(--look-soft) !important;
+  color: #ffffff !important;
+  border-color: var(--look-soft) !important;
+}
+
+.gradio-container .look-portrait {
+  border-color: var(--look-portrait) !important;
+  border-width: 2px !important;
+}
+.gradio-container .look-portrait .block-label,
+.gradio-container .look-portrait span.block-info,
+.gradio-container .look-portrait .label-wrap,
+.gradio-container .look-portrait label,
+.gradio-container .look-portrait .block-title {
+  background: var(--look-portrait) !important;
+  color: #111111 !important;
+  border-color: var(--look-portrait) !important;
+}
+
+.gradio-container .look-sockets {
+  border-color: var(--look-sockets) !important;
+  border-width: 2px !important;
+}
+.gradio-container .look-sockets .block-label,
+.gradio-container .look-sockets span.block-info,
+.gradio-container .look-sockets .label-wrap,
+.gradio-container .look-sockets label,
+.gradio-container .look-sockets .block-title {
+  background: var(--look-sockets) !important;
+  color: #111111 !important;
+  border-color: var(--look-sockets) !important;
+}
+
+.gradio-container .look-scenery {
+  border-color: var(--look-scenery) !important;
+  border-width: 2px !important;
+}
+.gradio-container .look-scenery .block-label,
+.gradio-container .look-scenery span.block-info,
+.gradio-container .look-scenery .label-wrap,
+.gradio-container .look-scenery label,
+.gradio-container .look-scenery .block-title {
+  background: var(--look-scenery) !important;
+  color: #ffffff !important;
+  border-color: var(--look-scenery) !important;
+}
 """
 
 
@@ -1855,14 +1981,49 @@ def build_ui() -> gr.Blocks:
 
         gr.Markdown("### Looks")
         with gr.Row():
-            thumb_ledger = gr.Image(type="numpy", label="Ledger gray", format="png")
-            thumb_magma = gr.Image(type="numpy", label="Magma", format="png")
-            thumb_punchy = gr.Image(type="numpy", label="Punchy near", format="png")
-            thumb_soft = gr.Image(type="numpy", label="Soft far", format="png")
+            thumb_ledger = gr.Image(
+                type="numpy",
+                label="Ledger gray",
+                format="png",
+                elem_classes=["look-thumb", "look-ledger"],
+            )
+            thumb_magma = gr.Image(
+                type="numpy",
+                label="Magma",
+                format="png",
+                elem_classes=["look-thumb", "look-magma"],
+            )
+            thumb_punchy = gr.Image(
+                type="numpy",
+                label="Punchy near",
+                format="png",
+                elem_classes=["look-thumb", "look-punchy"],
+            )
+            thumb_soft = gr.Image(
+                type="numpy",
+                label="Soft far",
+                format="png",
+                elem_classes=["look-thumb", "look-soft"],
+            )
         with gr.Row():
-            thumb_portrait = gr.Image(type="numpy", label="Portrait", format="png")
-            thumb_sockets = gr.Image(type="numpy", label="Sockets", format="png")
-            thumb_scenery = gr.Image(type="numpy", label="Scenery", format="png")
+            thumb_portrait = gr.Image(
+                type="numpy",
+                label="Portrait",
+                format="png",
+                elem_classes=["look-thumb", "look-portrait"],
+            )
+            thumb_sockets = gr.Image(
+                type="numpy",
+                label="Sockets",
+                format="png",
+                elem_classes=["look-thumb", "look-sockets"],
+            )
+            thumb_scenery = gr.Image(
+                type="numpy",
+                label="Scenery",
+                format="png",
+                elem_classes=["look-thumb", "look-scenery"],
+            )
 
         gr.Markdown("### Scenery matte")
         with gr.Row():
