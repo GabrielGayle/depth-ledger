@@ -1,0 +1,23 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+outputs/
+checkpoints/
+.DS_Store
+*.ckpt
+*.pt
+*.pth
+.huggingface/
+.cache/
+PromptDA/promptda.egg-info/
+DepthPro/*.egg-info/
+DepthPro/src/*.egg-info/
+DepthPro/src/depth_pro.egg-info/
+
+# Large upstream marketing assets (keep example_images for the Gradio demo)
+PromptDA/assets/teaser.gif
+PromptDA/assets/paper.pdf

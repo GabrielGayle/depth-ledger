@@ -1,0 +1,30 @@
+# Mac / Apple Silicon friendly pins (no CUDA xformers)
+torch>=2.2.0
+torchvision>=0.17.0
+lightning>=2.1.3
+imageio>=2.33.1
+# Gradio 4.44 requires Pillow < 11; Depth Pro HEIC uses pillow_heif < 1.0 with that pin.
+Pillow>=10.1.0,<11.0
+imageio-ffmpeg
+einops
+tqdm
+transformers
+termcolor
+numpy>=1.26.0,<2
+opencv-python>=4.9.0
+scipy
+matplotlib
+h5py
+tyro>=0.9.2
+huggingface_hub
+# Gradio 4.44 + pydantic>=2.11 breaks page load (bool additionalProperties in API schema).
+# Stay on Gradio 4.x: Python 3.9 cannot use Gradio 5.
+gradio==4.44.1
+pydantic>=2.0,<2.11
+fastapi>=0.111,<0.116
+# Optional; needs Python 3.10+. App falls back to side-by-side images on 3.9.
+# gradio-imageslider>=0.0.20
+trimesh
+# Apple Depth Pro (also: pip install -e ./DepthPro)
+timm
+pillow_heif>=0.13.0,<1.0
