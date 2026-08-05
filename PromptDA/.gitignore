@@ -4,6 +4,7 @@
 .vscode
 .hydra
 *.txt
+!requirements.txt
 # All file or folders start with tmp will be ignored
 tmp*  
 
@@ -184,6 +185,9 @@ glove
 *.jpg
 *.png
 *.mp4
+# Keep Gradio bundled examples
+!assets/example_images/
+!assets/example_images/**
 
 *.ipynb
 *.ply
