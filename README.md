@@ -99,11 +99,36 @@ Open http://127.0.0.1:7860
 
 With PromptDA + `camera_matrix.csv`, the app also exports a `.ply` point cloud. Outputs land under `outputs/` as uint16 millimeter depth PNGs.
 
+## CLI (DepthPaper + splat lift)
+
+Install the package and optional SPZ support:
+
+```bash
+pip install -e .
+pip install 'git+https://github.com/nianticlabs/spz.git'  # for --lift
+```
+
+```bash
+# DepthPaper bundle (rgb.jpg, depth_mm.png, camera.json)
+depth-ledger bundle path/to/photo.jpg -o ./out/scene --model depth-pro
+
+# Bundle + 3DGS .ply and Niantic .spz for gabrielgaylesplat
+depth-ledger bundle path/to/photo.jpg -o ./out/scene --model depth-pro --lift
+
+# Lift an existing bundle
+depth-ledger lift ./out/scene
+```
+
+Bundle schema: [docs/depthpaper-bundle.md](docs/depthpaper-bundle.md). Viewer integration: [STACK-RECOMMENDATION.md](STACK-RECOMMENDATION.md).
+
 ## Project layout
 
 ```
-promptda-depth-generator/
-  app.py                 # Gradio UI + model registry
+depth-ledger/
+  app.py                 # Gradio UI (uses depth_ledger)
+  depth_ledger/          # Inference, DepthPaper bundles, lift CLI
+  docs/depthpaper-bundle.md
+  STACK-RECOMMENDATION.md
   requirements.txt       # Mac-friendly deps
   PromptDA/              # Upstream PromptDA (editable install)
   DepthPro/              # Upstream Apple ml-depth-pro (editable install)
