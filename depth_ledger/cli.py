@@ -7,13 +7,24 @@ import argparse
 import sys
 from pathlib import Path
 
-from depth_ledger.bundle import bundle_from_image
+from depth_ledger.intrinsics import load_camera_matrix_csv
 from depth_ledger.lift import LiftOptions, lift_bundle
 from depth_ledger.models import DEFAULT_MODEL, MAX_SIZE, is_promptda, normalize_model_key
 from depth_ledger.paths import BUNDLE_CAMERA_NAME, BUNDLE_DEPTH_NAME, BUNDLE_RGB_NAME
 
 
+def _lift_options_from_args(args: argparse.Namespace) -> LiftOptions:
+    return LiftOptions(
+        stride=int(args.stride),
+        depth_min_m=float(args.depth_min),
+        depth_max_m=float(args.depth_max),
+        discontinuity_threshold=float(args.discontinuity_threshold),
+    )
+
+
 def _cmd_bundle(args: argparse.Namespace) -> int:
+    from depth_ledger.bundle import bundle_from_image
+
     image = Path(args.image)
     if not image.is_file():
         print(f"error: image not found: {image}", file=sys.stderr)
@@ -24,14 +35,27 @@ def _cmd_bundle(args: argparse.Namespace) -> int:
     if is_promptda(model) and prompt is None:
         print("error: PromptDA requires --prompt-depth", file=sys.stderr)
         return 1
+    if is_promptda(model) and not args.camera_matrix:
+        print("error: PromptDA requires --camera-matrix", file=sys.stderr)
+        return 1
 
-    paths = bundle_from_image(
-        image,
-        out,
-        model_key=model,
-        max_size=int(args.max_size),
-        prompt_depth_path=prompt,
-    )
+    camera_matrix = None
+    if args.camera_matrix:
+        camera_matrix = load_camera_matrix_csv(args.camera_matrix)
+
+    try:
+        paths = bundle_from_image(
+            image,
+            out,
+            model_key=model,
+            max_size=int(args.max_size),
+            prompt_depth_path=prompt,
+            camera_matrix=camera_matrix,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
     print(f"wrote {paths['rgb']}")
     print(f"wrote {paths['depth_mm']}")
     print(f"wrote {paths['camera']}")
@@ -44,11 +68,7 @@ def _cmd_bundle(args: argparse.Namespace) -> int:
 def _lift_into(bundle_dir: Path, args: argparse.Namespace) -> int:
     ply = Path(args.ply) if args.ply else bundle_dir / "splat.ply"
     spz_out = Path(args.spz) if args.spz else bundle_dir / "splat.spz"
-    opts = LiftOptions(
-        stride=int(args.stride),
-        depth_min_m=float(args.depth_min),
-        depth_max_m=float(args.depth_max),
-    )
+    opts = _lift_options_from_args(args)
     try:
         ply_path, spz_path = lift_bundle(bundle_dir, ply, spz_out, opts)
     except ImportError as exc:
@@ -90,6 +110,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="depth-pro | promptda-small | promptda-large",
     )
     bundle.add_argument("--prompt-depth", type=Path, default=None, help="PromptDA uint16 mm PNG")
+    bundle.add_argument(
+        "--camera-matrix",
+        type=Path,
+        default=None,
+        help="Stray camera_matrix.csv (required for PromptDA)",
+    )
     bundle.add_argument("--max-size", type=int, default=MAX_SIZE, help="PromptDA max side")
     bundle.add_argument("--lift", action="store_true", help="Also write splat.ply and splat.spz")
     bundle.add_argument("--ply", type=Path, default=None, help="PLY path when --lift")
@@ -97,6 +123,12 @@ def build_parser() -> argparse.ArgumentParser:
     bundle.add_argument("--stride", type=int, default=2, help="Lift subsample stride")
     bundle.add_argument("--depth-min", type=float, default=0.05, help="Lift near clip (m)")
     bundle.add_argument("--depth-max", type=float, default=80.0, help="Lift far clip (m)")
+    bundle.add_argument(
+        "--discontinuity-threshold",
+        type=float,
+        default=0.05,
+        help="Relative depth jump vs neighbours to drop before lift (0=off)",
+    )
     bundle.set_defaults(func=_cmd_bundle)
 
     lift = sub.add_parser("lift", help="Lift an existing DepthPaper bundle to .ply + .spz")
@@ -106,6 +138,7 @@ def build_parser() -> argparse.ArgumentParser:
     lift.add_argument("--stride", type=int, default=2)
     lift.add_argument("--depth-min", type=float, default=0.05)
     lift.add_argument("--depth-max", type=float, default=80.0)
+    lift.add_argument("--discontinuity-threshold", type=float, default=0.05)
     lift.set_defaults(func=_cmd_lift)
 
     return parser

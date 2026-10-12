@@ -5,16 +5,13 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Optional, Tuple
+from typing import Any, Optional, Tuple
 
-import cv2
 import numpy as np
-import torch
 
-from promptda.promptda import PromptDA
-from promptda.utils.io_wrapper import load_depth, load_image
-
+from depth_ledger.intrinsics import scale_stray_camera_matrix
 from depth_ledger.paths import CHECKPOINT_PATH
+from depth_ledger.types import FocalEstimateSource, MetricDepthResult
 
 MODEL_CHOICES: list[tuple[str, str]] = [
     ("Depth Pro (RGB only)", "depth-pro"),
@@ -36,13 +33,6 @@ _LEGACY_MODEL = {
     "depth_pro": "depth-pro",
 }
 
-FocalEstimateSource = Literal[
-    "exif",
-    "depth_pro_fov",
-    "promptda_intrinsics",
-    "default_pinhole",
-]
-
 
 def normalize_model_key(raw: str) -> str:
     key = (raw or "").strip().lower()
@@ -55,6 +45,8 @@ def is_promptda(model_key: str) -> bool:
 
 
 def pick_device(model_key: str) -> str:
+    import torch
+
     forced = os.environ.get("PROMPTDA_DEVICE", "").strip().lower()
     if forced in {"cpu", "mps", "cuda"}:
         return forced
@@ -78,18 +70,6 @@ class LoadedBackend:
     transform: Any = None
 
 
-@dataclass
-class MetricDepthResult:
-    """Single-frame metric depth in metres."""
-
-    color: np.ndarray  # HxWx3 uint8 RGB
-    depth_m: np.ndarray  # HxW float32 metres
-    model_key: str
-    focal_length_px: float
-    focal_estimate_source: FocalEstimateSource
-    prompt_depth_m: Optional[np.ndarray] = None
-
-
 _backend: Optional[LoadedBackend] = None
 
 
@@ -102,6 +82,9 @@ def get_backend(model_key: str = DEFAULT_MODEL) -> LoadedBackend:
         return _backend
 
     if key in PROMPTDA_IDS:
+        import torch
+        from promptda.promptda import PromptDA
+
         repo_id, encoder = PROMPTDA_IDS[key]
         print(f"Loading PromptDA ({key}) on {device} from {repo_id}…")
         model = (
@@ -113,6 +96,7 @@ def get_backend(model_key: str = DEFAULT_MODEL) -> LoadedBackend:
         return _backend
 
     import depth_pro
+    import torch
     from depth_pro.depth_pro import DEFAULT_MONODEPTH_CONFIG_DICT, DepthProConfig
 
     if not CHECKPOINT_PATH.exists():
@@ -144,7 +128,7 @@ def get_backend(model_key: str = DEFAULT_MODEL) -> LoadedBackend:
     return _backend
 
 
-def _tensor_to_rgb(image: torch.Tensor) -> np.ndarray:
+def _tensor_to_rgb(image) -> np.ndarray:
     arr = image[0].detach().cpu().permute(1, 2, 0).numpy()
     return (arr * 255.0).clip(0, 255).astype(np.uint8)
 
@@ -154,7 +138,11 @@ def infer_promptda(
     rgb_path: Path,
     prompt_depth_path: Path,
     max_size: int,
+    camera_matrix: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, FocalEstimateSource]:
+    import torch
+    from promptda.utils.io_wrapper import load_depth, load_image
+
     device = backend.device
     image = load_image(str(rgb_path), max_size=max_size).to(device)
     prompt_depth = load_depth(str(prompt_depth_path)).to(device)
@@ -162,17 +150,20 @@ def infer_promptda(
     with torch.no_grad():
         depth_t = backend.model.predict(image, prompt_depth)
 
-    depth = depth_t[0, 0].detach().cpu().numpy()
+    depth = depth_t[0, 0].detach().cpu().numpy().astype(np.float32)
     color = _tensor_to_rgb(image)
     prompt_np = prompt_depth[0, 0].detach().cpu().numpy()
     h, w = depth.shape
-    focal = float(max(h, w))
-    return color, depth.astype(np.float32), prompt_np, focal, "promptda_intrinsics"
+    k = scale_stray_camera_matrix(camera_matrix, h, w)
+    focal = float(k[0, 0])
+    return color, depth, prompt_np, focal, "camera_matrix"
 
 
 def infer_depth_pro(
     backend: LoadedBackend, rgb_path: Path
 ) -> Tuple[np.ndarray, np.ndarray, float, FocalEstimateSource]:
+    import cv2
+    import torch
     from depth_pro import load_rgb
 
     image_np, _, f_px_exif = load_rgb(rgb_path)
@@ -210,6 +201,7 @@ def run_metric_depth(
     model_key: str = DEFAULT_MODEL,
     max_size: int = MAX_SIZE,
     prompt_depth_path: Optional[Path] = None,
+    camera_matrix: Optional[np.ndarray] = None,
 ) -> MetricDepthResult:
     """Run Depth Pro or PromptDA and return aligned RGB + metric depth."""
     key = normalize_model_key(model_key)
@@ -221,8 +213,17 @@ def run_metric_depth(
                 "PromptDA requires a LiDAR prompt depth PNG (uint16 mm). "
                 "Use depth-pro for RGB-only images."
             )
+        if camera_matrix is None:
+            raise ValueError(
+                "PromptDA requires a camera intrinsics matrix (e.g. Stray "
+                "camera_matrix.csv). Pass --camera-matrix to the CLI."
+            )
         color, depth, prompt_np, focal, source = infer_promptda(
-            backend, rgb_path, prompt_depth_path, int(max_size)
+            backend,
+            rgb_path,
+            prompt_depth_path,
+            int(max_size),
+            camera_matrix,
         )
         return MetricDepthResult(
             color=color,

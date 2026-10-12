@@ -906,8 +906,13 @@ def _run_inference(
                 "PromptDA requires a LiDAR prompt depth PNG (uint16 mm). "
                 "Switch to Depth Pro for RGB-only, or provide prompt depth."
             )
+        if ixt is None:
+            raise gr.Error(
+                "PromptDA needs Stray camera_matrix.csv in the zip (or another "
+                "intrinsics source). Depth Pro works for RGB-only photos."
+            )
         color, depth, prompt_np, _, _ = infer_promptda(
-            backend, rgb_path, prompt_depth_path, max_size
+            backend, rgb_path, prompt_depth_path, max_size, ixt
         )
     else:
         color, depth, _, _ = infer_depth_pro(backend, rgb_path)

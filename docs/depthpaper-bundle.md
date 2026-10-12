@@ -1,6 +1,6 @@
 # DepthPaper bundle
 
-A **DepthPaper bundle** is a single-directory interchange format between **depth-ledger** (metric depth inference) and **gabrielgaylesplat** (viewer / splat stack). One bundle corresponds to one RGB frame with aligned metric depth and pinhole intrinsics.
+A **DepthPaper bundle** is a single-directory interchange format between **depth-ledger** and **gabrielgaylesplat** (Spark viewer). One bundle is one RGB frame with aligned metric depth and pinhole intrinsics.
 
 ## Layout
 
@@ -11,44 +11,33 @@ my_scene/
   camera.json      # Pinhole intrinsics + metadata
 ```
 
-Optional outputs from `depth-ledger lift` (not part of the core bundle contract):
+Optional outputs from `depth-ledger lift`:
 
 ```
 my_scene/
-  splat.ply        # Standard 3D Gaussian Splatting PLY (binary little-endian)
-  splat.spz        # Niantic SPZ (same splat, RDF coordinates)
+  splat.ply        # Standard 3DGS binary PLY (RDF)
+  splat.spz        # Niantic SPZ for Spark web delivery
 ```
 
 ## `depth_mm.png`
 
 - Single channel, unsigned 16-bit.
-- Value `d` encodes depth **`d / 1000` metres** along the camera +Z axis.
-- Invalid or unknown pixels should be `0` (treated as no depth).
-- Values are clipped to **65535 mm** (~65.5 m) when written by depth-ledger.
+- Value `d` encodes depth **`d / 1000` metres** along camera +Z.
+- Invalid pixels: `0`.
+- Clipped to **65535 mm** when written.
 
 ## `camera.json`
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `format_version` | string | Schema version (currently `"1.0"`). |
-| `width` | int | Image width in pixels (matches `rgb.jpg` / `depth_mm.png`). |
-| `height` | int | Image height in pixels. |
-| `fx` | float | Focal length in pixels (x). |
-| `fy` | float | Focal length in pixels (y). |
-| `cx` | float | Principal point x (pixels). |
-| `cy` | float | Principal point y (pixels). |
-| `units` | string | Scene / depth scale hint for consumers (`"millimeters"`). |
-| `depth_units` | string | Always `"millimeters"` for `depth_mm.png`. |
-| `focal_estimate_source` | string | How `fx`/`fy` were obtained (see below). |
-
-### `focal_estimate_source`
-
-| Value | Meaning |
-|-------|---------|
-| `exif` | Focal length from image EXIF (Depth Pro path). |
-| `depth_pro_fov` | Depth Pro FOV head estimate. |
-| `promptda_intrinsics` | PromptDA pipeline (placeholder: max side as focal). |
-| `default_pinhole` | Fallback when no EXIF / FOV estimate exists. |
+| `format_version` | string | `"1.0"` |
+| `width`, `height` | int | Pixel size (matches rgb + depth) |
+| `fx`, `fy`, `cx`, `cy` | float | Pinhole intrinsics (pixels) |
+| `f_px` | float | Focal length in pixels (equals `fx` for square pixels) |
+| `near_m`, `far_m` | float | Scene depth window (metres) from valid depth percentiles |
+| `world_units` | string | `"meters"` for 3D/unprojection |
+| `depth_units` | string | `"millimeters"` for `depth_mm.png` |
+| `focal_estimate_source` | string | `exif` \| `depth_pro_fov` \| `camera_matrix` \| `default_pinhole` |
 
 ### Example
 
@@ -61,26 +50,31 @@ my_scene/
   "fy": 1420.5,
   "cx": 767.5,
   "cy": 767.5,
-  "units": "millimeters",
+  "f_px": 1420.5,
+  "near_m": 0.42,
+  "far_m": 12.8,
+  "world_units": "meters",
   "depth_units": "millimeters",
   "focal_estimate_source": "depth_pro_fov"
 }
 ```
 
-## Coordinate convention
+## Coordinates
 
-- **Camera**: OpenCV-style pinhole — **X right, Y down, Z forward** (metres in unprojection; millimetres in PNG).
-- **3DGS PLY / SPZ from lift**: Written in **RDF** via [Niantic `spz`](https://github.com/nianticlabs/spz), matching common PLY splat loaders (`3dgs-loader` / `SpzLoader`, PlayCanvas `splat-transform`, etc.).
+- **Camera**: OpenCV pinhole — X right, Y down, Z forward (metres when unprojecting).
+- **Lift output**: RDF via Niantic `spz`, compatible with **Spark 2.3.1** SPZ/PLY loading.
 
 ## CLI
 
 ```bash
-# Write bundle only
 depth-ledger bundle path/to/photo.jpg -o ./out/my_scene --model depth-pro
-
-# Bundle + splat lift
 depth-ledger bundle path/to/photo.jpg -o ./out/my_scene --model depth-pro --lift
-
-# Lift an existing bundle
 depth-ledger lift ./out/my_scene
+```
+
+PromptDA:
+
+```bash
+depth-ledger bundle rgb.jpg -o ./out/scene --model promptda-small \
+  --prompt-depth depth.png --camera-matrix camera_matrix.csv
 ```

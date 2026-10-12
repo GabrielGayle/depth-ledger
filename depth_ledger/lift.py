@@ -10,11 +10,15 @@ from typing import Optional
 import numpy as np
 
 from depth_ledger.bundle import CameraIntrinsics, read_depthpaper_bundle
-from promptda.utils.depth_utils import unproject_depth
+from depth_ledger.geometry import (
+    pixel_footprint_m,
+    suppress_depth_discontinuities,
+    unproject_depth,
+)
 
 try:
     import spz
-except ImportError:  # pragma: no cover - optional at import time, required for lift
+except ImportError:  # pragma: no cover
     spz = None
 
 
@@ -23,8 +27,9 @@ class LiftOptions:
     stride: int = 2
     depth_min_m: float = 0.05
     depth_max_m: float = 80.0
-    base_scale_fraction: float = 0.004
+    scale_relative_to_footprint: float = 0.75
     opacity: float = 0.92
+    discontinuity_threshold: float = 0.05
     coordinate_system: str = "RDF"
 
 
@@ -34,7 +39,6 @@ def _inverse_sigmoid(x: float) -> float:
 
 
 def _rgb_to_sh_dc(rgb: np.ndarray) -> np.ndarray:
-    """Map linear RGB in [0,1] to SH DC coefficients (3DGS convention)."""
     c0 = 0.28209479177387814
     return (rgb.astype(np.float32) - 0.5) / c0
 
@@ -60,6 +64,11 @@ def lift_rgbd_to_gaussian_cloud(
     if depth.shape[:2] != rgb.shape[:2]:
         raise ValueError("RGB and depth spatial sizes must match")
 
+    depth = suppress_depth_discontinuities(
+        depth,
+        relative_threshold=float(opts.discontinuity_threshold),
+    )
+
     depth_sub = depth[::stride, ::stride]
     rgb_sub = rgb[::stride, ::stride]
     ixt = intrinsics.as_matrix().copy()
@@ -67,6 +76,7 @@ def lift_rgbd_to_gaussian_cloud(
     ixt[1, 1] /= stride
     ixt[0, 2] /= stride
     ixt[1, 2] /= stride
+    fx_eff = float(ixt[0, 0])
 
     points, colors = unproject_depth(
         depth_sub,
@@ -81,8 +91,9 @@ def lift_rgbd_to_gaussian_cloud(
 
     n = points.shape[0]
     z = np.clip(points[:, 2], opts.depth_min_m, None)
-    pixel_size = z / max(intrinsics.fx / stride, 1.0)
-    radius = np.clip(pixel_size * opts.base_scale_fraction, 1e-4, 0.5)
+    footprint = pixel_footprint_m(z, fx_eff)
+    rel = float(np.clip(opts.scale_relative_to_footprint, 0.5, 1.0))
+    radius = np.clip(footprint * rel, 1e-4, 2.0)
     log_scale = np.log(radius).astype(np.float32)
 
     sh_dc = _rgb_to_sh_dc(colors)
@@ -117,7 +128,6 @@ def write_gaussian_splat(
     spz_path: Path,
     options: Optional[LiftOptions] = None,
 ) -> tuple[Path, Path]:
-    """Write standard 3DGS .ply then Niantic .spz (RDF / PLY convention)."""
     opts = options or LiftOptions()
     pack = _pack_options_from_lift(opts)
     ply_path = Path(ply_path)

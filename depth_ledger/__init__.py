@@ -2,24 +2,22 @@
 
 from depth_ledger.bundle import (
     CameraIntrinsics,
-    bundle_from_image,
     read_depthpaper_bundle,
     write_depthpaper_bundle,
 )
 from depth_ledger.lift import lift_bundle
 from depth_ledger.models import (
     DEFAULT_MODEL,
-    MetricDepthResult,
     get_backend,
     normalize_model_key,
     run_metric_depth,
 )
+from depth_ledger.types import MetricDepthResult
 
 __all__ = [
     "DEFAULT_MODEL",
     "CameraIntrinsics",
     "MetricDepthResult",
-    "bundle_from_image",
     "get_backend",
     "lift_bundle",
     "normalize_model_key",
@@ -27,3 +25,9 @@ __all__ = [
     "run_metric_depth",
     "write_depthpaper_bundle",
 ]
+
+
+def bundle_from_image(*args, **kwargs):
+    from depth_ledger.bundle import bundle_from_image as _bundle_from_image
+
+    return _bundle_from_image(*args, **kwargs)

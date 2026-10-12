@@ -119,7 +119,7 @@ depth-ledger bundle path/to/photo.jpg -o ./out/scene --model depth-pro --lift
 depth-ledger lift ./out/scene
 ```
 
-Bundle schema: [docs/depthpaper-bundle.md](docs/depthpaper-bundle.md). Viewer integration: [STACK-RECOMMENDATION.md](STACK-RECOMMENDATION.md).
+Bundle schema: [docs/depthpaper-bundle.md](docs/depthpaper-bundle.md). Viewer (Spark 2.3.1): [docs/integration.md](docs/integration.md).
 
 ## Project layout
 
@@ -128,7 +128,7 @@ depth-ledger/
   app.py                 # Gradio UI (uses depth_ledger)
   depth_ledger/          # Inference, DepthPaper bundles, lift CLI
   docs/depthpaper-bundle.md
-  STACK-RECOMMENDATION.md
+  docs/integration.md
   requirements.txt       # Mac-friendly deps
   PromptDA/              # Upstream PromptDA (editable install)
   DepthPro/              # Upstream Apple ml-depth-pro (editable install)
