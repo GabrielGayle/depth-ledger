@@ -25,6 +25,7 @@ fastapi>=0.111,<0.116
 # Optional; needs Python 3.10+. App falls back to side-by-side images on 3.9.
 # gradio-imageslider>=0.0.20
 trimesh
+# Splat lift (.spz): pip install 'git+https://github.com/nianticlabs/spz.git'
 # Apple Depth Pro (also: pip install -e ./DepthPro)
 timm
 pillow_heif>=0.13.0,<1.0

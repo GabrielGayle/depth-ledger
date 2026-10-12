@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "depth-ledger"
+version = "0.2.0"
+description = "Metric depth (Depth Pro / PromptDA), DepthPaper bundles, and splat lift for gabrielgaylesplat"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+  "numpy>=1.26.0,<2",
+  "imageio>=2.33.1",
+  "opencv-python>=4.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0",
+]
+lift = [
+  "spz @ git+https://github.com/nianticlabs/spz.git",
+]
+
+[project.scripts]
+depth-ledger = "depth_ledger.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["depth_ledger*"]
