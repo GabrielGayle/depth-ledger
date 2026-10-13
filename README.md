@@ -121,6 +121,15 @@ depth-ledger lift ./out/scene
 
 Bundle schema: [docs/depthpaper-bundle.md](docs/depthpaper-bundle.md). Viewer (Spark 2.3.1): [docs/integration.md](docs/integration.md).
 
+## Running tests locally
+
+```bash
+pip install numpy imageio opencv-python pytest
+pip install 'git+https://github.com/nianticlabs/spz.git'
+pip install -e .
+pytest tests/ -q
+```
+
 ## Project layout
 
 ```
