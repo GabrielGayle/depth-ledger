@@ -18,6 +18,21 @@ DepthPro/*.egg-info/
 DepthPro/src/*.egg-info/
 DepthPro/src/depth_pro.egg-info/
 
-# Large upstream marketing assets (keep example_images for the Gradio demo)
+# Large upstream marketing assets (keep example_images for demos)
 PromptDA/assets/teaser.gif
 PromptDA/assets/paper.pdf
+
+# Node / Vite
+web/node_modules/
+web/dist/
+
+.env
+.env.*
+!.env.example
+
+# Local stack logs / pids from scripts/dev.sh
+.logs/
+
+# Blender autosave backups, TS build cache
+*.blend1
+*.tsbuildinfo

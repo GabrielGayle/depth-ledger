@@ -13,15 +13,18 @@ import {
 import "@xyflow/react/dist/style.css";
 
 import {
+  bakeRun,
   bust,
   cancelJob,
   clearDefaultGraph,
   evaluateGraph,
   exportRunVideo,
   fetchArenaChannels,
+  fetchArenaKitchens,
   fetchDefaultGraph,
   fetchMeta,
   fetchModalUsage,
+  fetchVideoRecipes,
   inferArena,
   inferRgb,
   inferZip,
@@ -29,26 +32,33 @@ import {
   loadRun,
   pollJob,
   pollVideoJob,
+  prepareVideo,
   publishToArena,
   resolveArena,
   saveDefaultGraph,
   setRunFrame,
   startArenaRoll,
-  startVideoInfer,
+  startPreparedInfer,
+  openInBlender,
   type ArenaChannelOption,
+  type ArenaKitchenEntry,
   type Graph,
   type InferResponse,
   type Meta,
   type ModalBilling,
+  type VideoRecipe,
 } from "./api";
 import { type BlendEdgeData } from "./edges";
 import { KitchenContext, clampWindowPct, lookDefaults } from "./kitchenContext";
 import type { WindowTuneMode, WindowTuneState } from "./kitchenContext";
 import { KitchenView } from "./KitchenView";
 import { OperatorView } from "./operator/OperatorView";
+import { VideoView } from "./video/VideoView";
+import { BatchView } from "./batch/BatchView";
 import { arenaDataFromResolve, mergeArenaNodeData } from "./arenaUtils";
+import { StatusStrip } from "./StatusStrip";
 
-const PROTECTED_TYPES = new Set(["depth", "output"]);
+const PROTECTED_TYPES = new Set(["depth", "output", "video_out"]);
 const IMAGE_TYPES = new Set(["look", "scene", "blend", "relief"]);
 
 function uid(prefix: string) {
@@ -117,6 +127,18 @@ function annotateEdge(
   };
 }
 
+// Saved graphs use the compact coordinate space; the canvas spreads them out
+// so the larger node panels don't overlap.
+const LAYOUT_SCALE = 1.5;
+
+function toCanvasPos(p: { x: number; y: number }) {
+  return { x: p.x * LAYOUT_SCALE, y: p.y * LAYOUT_SCALE };
+}
+
+function toGraphPos(p: { x: number; y: number }) {
+  return { x: p.x / LAYOUT_SCALE, y: p.y / LAYOUT_SCALE };
+}
+
 function toFlow(graph: Graph, meta: Meta | null): { nodes: Node[]; edges: Edge[] } {
   const nodes: Node[] = (graph.nodes || []).map((n) => {
     const data = { ...(n.data || {}) };
@@ -148,13 +170,42 @@ function toFlow(graph: Graph, meta: Meta | null): { nodes: Node[]; edges: Edge[]
         data.max_side = meta?.relief?.default_max_side ?? 512;
       }
     }
-    if (n.type === "output" && data.preview_width == null) {
+    if (n.type === "smooth") {
+      const d = meta?.smooth?.defaults;
+      if (data.collapsed === undefined) data.collapsed = true;
+      if (data.mode == null) data.mode = d?.mode ?? "ema";
+      if (data.window_mode == null) data.window_mode = d?.window_mode ?? "locked";
+      if (data.window_lock == null) data.window_lock = d?.window_lock ?? "first";
+      if (data.spline_interval == null) {
+        data.spline_interval = d?.spline_interval ?? 30;
+      }
+      if (data.lo_pct == null) data.lo_pct = d?.lo_pct ?? 2;
+      if (data.hi_pct == null) data.hi_pct = d?.hi_pct ?? 98;
+      if (data.temporal == null) data.temporal = d?.temporal ?? "ema";
+      if (data.ema_alpha == null) data.ema_alpha = d?.ema_alpha ?? 0.45;
+      if (data.flow_prior == null) {
+        data.flow_prior =
+          d?.flow_prior ??
+          (data.flow_weight != null ? 1 - Number(data.flow_weight) : 0.75);
+      }
+      if (data.occ_thresh == null) data.occ_thresh = d?.occ_thresh ?? 1.5;
+    }
+    if (n.type === "freq_fuse") {
+      const d = meta?.freq_fuse?.defaults;
+      if (data.collapsed === undefined) data.collapsed = true;
+      if (data.beta == null) data.beta = d?.beta ?? 1;
+      if (data.blur_sigma == null) data.blur_sigma = d?.blur_sigma ?? 4;
+    }
+    if (
+      (n.type === "output" || n.type === "video_out") &&
+      data.preview_width == null
+    ) {
       data.preview_width = 420;
     }
     return {
       id: n.id,
       type: n.type,
-      position: n.position || { x: 0, y: 0 },
+      position: toCanvasPos(n.position || { x: 0, y: 0 }),
       data,
       selected: false,
       deletable: !PROTECTED_TYPES.has(n.type || ""),
@@ -183,7 +234,7 @@ function fromFlow(nodes: Node[], edges: Edge[]): Graph {
     nodes: nodes.map((n) => ({
       id: n.id,
       type: n.type,
-      position: n.position,
+      position: toGraphPos(n.position),
       data: n.data,
     })),
     edges: edges.map((e) => {
@@ -261,6 +312,7 @@ export default function App() {
     title: string;
   } | null>(null);
   const [hasCustomDefault, setHasCustomDefault] = useState(false);
+  const [hasCustomVideoDefault, setHasCustomVideoDefault] = useState(false);
   const [status, setStatus] = useState("Booting…");
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<ProgressPhase>(null);
@@ -270,15 +322,32 @@ export default function App() {
   const [edgeModalId, setEdgeModalId] = useState<string | null>(null);
   const [runs, setRuns] = useState<{ run_id: string; label: string }[]>([]);
   const [frameCount, setFrameCount] = useState(1);
+  const [readyFrames, setReadyFrames] = useState(1);
+  const [readyIndices, setReadyIndices] = useState<number[]>([]);
+  const [inferMode, setInferMode] = useState<string | null>(null);
+  const [frameWidth, setFrameWidth] = useState<number | null>(null);
+  const [frameHeight, setFrameHeight] = useState<number | null>(null);
+  const [frameStatusExpanded, setFrameStatusExpanded] = useState(false);
+  const [inferStatus, setInferStatus] = useState<string>("done");
   const [frameIndex, setFrameIndex] = useState(0);
   const [sampleFps, setSampleFps] = useState(10);
   const [playing, setPlaying] = useState(false);
   const [exportUrl, setExportUrl] = useState<string | null>(null);
   const [videoProgress, setVideoProgress] = useState<number | null>(null);
+  const [previewGifUrl, setPreviewGifUrl] = useState<string | null>(null);
+  const [frameUrls, setFrameUrls] = useState<string[]>([]);
   const [arenaChannels, setArenaChannels] = useState<ArenaChannelOption[]>([]);
   const [arenaAuth, setArenaAuth] = useState(false);
+  const [kitchenUrl, setKitchenUrl] = useState("");
+  const [arenaKitchens, setArenaKitchens] = useState<ArenaKitchenEntry[]>([]);
+  const [videoRecipes, setVideoRecipes] = useState<VideoRecipe[]>([]);
+  const [kitchenPick, setKitchenPick] = useState("");
   const [windowTune, setWindowTune] = useState<WindowTuneState>(null);
-  const [appMode, setAppMode] = useState<"kitchen" | "operator">("kitchen");
+  const [appMode, setAppMode] = useState<
+    "kitchen" | "operator" | "video" | "batch"
+  >("kitchen");
+  const [filmHistoryId, setFilmHistoryId] = useState<string | null>(null);
+  const [lastEvaluateAt, setLastEvaluateAt] = useState<string | null>(null);
 
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
@@ -288,12 +357,14 @@ export default function App() {
   const edgesRef = useRef(edges);
   const fileRgb = useRef<HTMLInputElement>(null);
   const fileZip = useRef<HTMLInputElement>(null);
-  const fileVideo = useRef<HTMLInputElement>(null);
   const playTimer = useRef<number | null>(null);
   const frameIndexRef = useRef(0);
   const seekingRef = useRef(false);
   const batchAbortRef = useRef(false);
   const batchJobIdRef = useRef<string | null>(null);
+  const frameCountRef = useRef(1);
+  const readyFramesRef = useRef(1);
+  const inferStatusRef = useRef("done");
 
   const formatUsd = (n: number) => {
     if (n < 0.01) return `~$${n.toFixed(4)}`;
@@ -340,14 +411,28 @@ export default function App() {
   useEffect(() => {
     frameIndexRef.current = frameIndex;
   }, [frameIndex]);
+  useEffect(() => {
+    frameCountRef.current = frameCount;
+  }, [frameCount]);
+  useEffect(() => {
+    readyFramesRef.current = readyFrames;
+  }, [readyFrames]);
+  useEffect(() => {
+    inferStatusRef.current = inferStatus;
+  }, [inferStatus]);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [m, d] = await Promise.all([fetchMeta(), fetchDefaultGraph()]);
+        const [m, d, recipes] = await Promise.all([
+          fetchMeta(),
+          fetchDefaultGraph(),
+          fetchVideoRecipes().catch(() => [] as VideoRecipe[]),
+        ]);
         if (cancelled) return;
         setMeta(m);
+        setVideoRecipes(recipes);
         setModelKey(m.default_model);
         setMaxSize(m.default_max_size);
         if (m.default_infer_backend === "modal" || m.default_infer_backend === "local") {
@@ -359,6 +444,7 @@ export default function App() {
           }
         }
         setHasCustomDefault(d.has_custom);
+        setHasCustomVideoDefault(Boolean(m.has_custom_video_default));
         setArenaAuth(Boolean(m.arena?.authenticated));
         if (m.modal_available) {
           fetchModalUsage()
@@ -423,13 +509,19 @@ export default function App() {
   const ingredientNodes = useMemo(
     () =>
       nodes.filter(
-        (n) => n.type === "look" || n.type === "scene" || n.type === "relief"
+        (n) =>
+          n.type === "look" ||
+          n.type === "scene" ||
+          n.type === "blend" ||
+          n.type === "relief" ||
+          n.type === "smooth" ||
+          n.type === "freq_fuse"
       ),
     [nodes]
   );
 
   const scheduleEvaluate = useCallback(
-    (nextNodes: Node[], nextEdges: Edge[], rid: string | null) => {
+    (nextNodes: Node[], nextEdges: Edge[], rid: string | null, opts?: { bake?: boolean }) => {
       if (!rid) return;
       if (evalTimer.current) window.clearTimeout(evalTimer.current);
       if (evalOverlayTimer.current) window.clearTimeout(evalOverlayTimer.current);
@@ -440,11 +532,32 @@ export default function App() {
           setProgress("evaluate");
         }, 300);
         try {
-          const res = await evaluateGraph(rid, fromFlow(nextNodes, nextEdges));
+          const graph = fromFlow(nextNodes, nextEdges);
+          const res = await evaluateGraph(rid, graph);
           setOutputUrl(res.output_url);
           setNodePreviews(res.node_previews || {});
           setEvalToken(Date.now());
-          setStatus(`Evaluated in ${res.elapsed_ms} ms`);
+          setLastEvaluateAt(new Date().toISOString());
+
+          const fc = frameCountRef.current;
+          const ready = readyFramesRef.current;
+          const status = inferStatusRef.current;
+          const shouldBake =
+            opts?.bake === true ||
+            (fc > 1 && ready >= 1 && status === "done");
+          if (shouldBake && fc > 1 && ready >= 1) {
+            setStatus("Baking video frames…");
+            const baked = await bakeRun(rid, graph);
+            setFrameUrls(baked.frame_urls || []);
+            if (baked.frame_urls?.[0]) {
+              setOutputUrl(baked.frame_urls[0]);
+            }
+            setStatus(
+              `Baked ${baked.baked_count} frames · eval ${res.elapsed_ms} ms`
+            );
+          } else {
+            setStatus(`Evaluated in ${res.elapsed_ms} ms`);
+          }
         } catch (e: any) {
           setStatus(`Eval error: ${e.message}`);
         } finally {
@@ -509,7 +622,7 @@ export default function App() {
   }, []);
 
   const startWindowTune = useCallback((nodeId: string) => {
-    setWindowTune({ nodeId, mode: "near", surface: "rgb" });
+    setWindowTune({ nodeId, mode: "near" });
   }, []);
 
   const stopWindowTune = useCallback(() => {
@@ -518,10 +631,6 @@ export default function App() {
 
   const setWindowTuneMode = useCallback((mode: WindowTuneMode) => {
     setWindowTune((t) => (t ? { ...t, mode } : t));
-  }, []);
-
-  const setWindowTuneSurface = useCallback((surface: "rgb" | "look") => {
-    setWindowTune((t) => (t ? { ...t, surface } : t));
   }, []);
 
   const applyWindowPct = useCallback(
@@ -549,35 +658,277 @@ export default function App() {
     }
   }, [evaluateNow, runId]);
 
+  const openBlender = useCallback(async () => {
+    if (!runId) {
+      setStatus("Generate or load a run first");
+      return;
+    }
+    setBusy(true);
+    setStatus("Exporting depth for Blender…");
+    try {
+      const res = await openInBlender(runId, { preset: "ledger" });
+      const pid = res.launch?.pid;
+      setStatus(
+        pid
+          ? `Opened Blender (pid ${pid}) · ${runId}`
+          : `Opened Blender · ${runId}`
+      );
+    } catch (e: any) {
+      setStatus(`Blender open failed: ${e.message}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [runId]);
+
+  const graphKind = frameCount > 1 ? "video" : "still";
+  const activeHasCustomDefault =
+    graphKind === "video" ? hasCustomVideoDefault : hasCustomDefault;
+
   const saveAsDefault = useCallback(async () => {
     if (!nodesRef.current.length) {
       setStatus("Nothing to save");
       return;
     }
+    const kind = frameCount > 1 ? "video" : "still";
     try {
-      await saveDefaultGraph(fromFlow(nodesRef.current, edgesRef.current));
-      setHasCustomDefault(true);
-      setStatus("Saved current graph as default kitchen");
+      await saveDefaultGraph(fromFlow(nodesRef.current, edgesRef.current), kind);
+      if (kind === "video") setHasCustomVideoDefault(true);
+      else setHasCustomDefault(true);
+      setStatus(
+        kind === "video"
+          ? "Saved current graph as default video kitchen"
+          : "Saved current graph as default kitchen"
+      );
     } catch (e: any) {
       setStatus(`Save default failed: ${e.message}`);
     }
-  }, []);
+  }, [frameCount]);
 
   const resetDefault = useCallback(async () => {
+    const kind = frameCount > 1 ? "video" : "still";
     try {
-      await clearDefaultGraph();
-      setHasCustomDefault(false);
-      const d = await fetchDefaultGraph();
+      await clearDefaultGraph(kind);
+      if (kind === "video") setHasCustomVideoDefault(false);
+      else setHasCustomDefault(false);
+      const d = await fetchDefaultGraph(kind);
       if (d.graph) {
         const flow = toFlow(d.graph, meta);
         setNodes(flow.nodes);
         setEdges(flow.edges);
       }
-      setStatus("Restored built-in default kitchen");
+      setStatus(
+        kind === "video"
+          ? "Restored built-in video kitchen"
+          : "Restored built-in default kitchen"
+      );
     } catch (e: any) {
       setStatus(`Reset default failed: ${e.message}`);
     }
-  }, [meta, setEdges, setNodes]);
+  }, [frameCount, meta, setEdges, setNodes]);
+
+  const applyArenaKitchen = useCallback(
+    (entry: ArenaKitchenEntry) => {
+      const recipe = entry.recipe || {};
+      const g = recipe.graph;
+      if (!g || !Array.isArray(g.nodes) || g.nodes.length === 0) {
+        setStatus("Kitchen recipe has no graph");
+        return;
+      }
+
+      const rid = runId || "";
+      const current = fromFlow(nodesRef.current, edgesRef.current);
+      const preserveTypes = new Set(["output", "arena_out"]);
+      const preserved = (current.nodes || []).filter((n) =>
+        preserveTypes.has(String(n.type || ""))
+      );
+
+      const recipeNodes = (g.nodes || []).map((n) => {
+        const data = { ...(n.data || {}) };
+        if (n.type === "depth") data.run_id = rid;
+        return { ...n, data };
+      });
+      const byId = new Map(recipeNodes.map((n) => [n.id, n]));
+      for (const p of preserved) {
+        if (!byId.has(p.id)) {
+          recipeNodes.push(p);
+          byId.set(p.id, p);
+        } else if (p.type === "arena_out") {
+          // Keep channel / title from the live canvas.
+          const existing = byId.get(p.id)!;
+          existing.data = {
+            ...(existing.data || {}),
+            channel_id: (p.data as any)?.channel_id || "",
+            title: (p.data as any)?.title || "",
+            batch_count: (p.data as any)?.batch_count,
+            wackiness: (p.data as any)?.wackiness,
+            max_fidelity: (p.data as any)?.max_fidelity,
+          };
+        }
+      }
+
+      // Ensure output exists.
+      if (![...byId.values()].some((n) => n.type === "output")) {
+        const maxX = Math.max(
+          0,
+          ...recipeNodes.map((n) => Number(n.position?.x || 0))
+        );
+        recipeNodes.push({
+          id: "output",
+          type: "output",
+          position: { x: maxX + 280, y: 40 },
+          data: { preview_width: 420 },
+        });
+        byId.set("output", recipeNodes[recipeNodes.length - 1]);
+      }
+
+      let nextEdges = [...(g.edges || [])];
+      const edgeIds = new Set(nextEdges.map((e) => e.id));
+      const imageTypes = new Set(["look", "scene", "blend", "relief"]);
+      const terminals = recipeNodes.filter((n) => imageTypes.has(String(n.type)));
+      const terminal =
+        terminals.find((n) => n.type === "relief") ||
+        terminals[terminals.length - 1];
+      const outNode = recipeNodes.find((n) => n.type === "output");
+      const arenaOut = recipeNodes.find((n) => n.type === "arena_out");
+
+      const ensureEdge = (
+        id: string,
+        source: string,
+        target: string,
+        data?: Record<string, unknown>
+      ) => {
+        if (nextEdges.some((e) => e.source === source && e.target === target)) {
+          return;
+        }
+        let eid = id;
+        while (edgeIds.has(eid)) eid = `${id}_${Math.random().toString(36).slice(2, 5)}`;
+        edgeIds.add(eid);
+        nextEdges.push({ id: eid, source, target, data });
+      };
+
+      if (terminal && outNode) {
+        ensureEdge(`e_${terminal.id}_o`, terminal.id, outNode.id);
+      }
+      if (terminal && arenaOut) {
+        ensureEdge(`e_${terminal.id}_ao`, terminal.id, arenaOut.id);
+      }
+
+      const graph: Graph = {
+        version: 2,
+        nodes: recipeNodes,
+        edges: nextEdges,
+      };
+      const flow = toFlow(graph, meta);
+      setNodes(flow.nodes);
+      setEdges(flow.edges);
+      setAppMode("kitchen");
+
+      if (recipe.model_key) setModelKey(String(recipe.model_key));
+      if (recipe.max_size) setMaxSize(Number(recipe.max_size));
+
+      const label = entry.run_name || entry.title || entry.summary || "kitchen";
+      setStatus(`Applied kitchen · ${label}`);
+      if (rid) scheduleEvaluate(flow.nodes, flow.edges, rid);
+    },
+    [meta, runId, scheduleEvaluate, setEdges, setNodes]
+  );
+
+  const applyVideoRecipe = useCallback(
+    (recipe: VideoRecipe) => {
+      const g = recipe.graph;
+      if (!g || !Array.isArray(g.nodes) || g.nodes.length === 0) {
+        setStatus("Video recipe has no graph");
+        return;
+      }
+
+      const rid = runId || "";
+      const liveIn = nodesRef.current.find((n) => n.type === "video_in");
+      const liveOut = nodesRef.current.find((n) => n.type === "video_out");
+
+      let nextEdges = (g.edges || []).map((e: any) => ({ ...e }));
+      const recipeNodes = (g.nodes || []).map((n: any) => {
+        const data = { ...(n.data || {}) };
+        if (n.type === "depth") data.run_id = rid;
+        if (n.type === "video_in") {
+          data.run_id = rid || (liveIn?.data as any)?.run_id || "";
+          if (liveIn?.data) {
+            const ld = liveIn.data as any;
+            if (ld.source_url) data.source_url = ld.source_url;
+            if (ld.preview_gif_url) data.preview_gif_url = ld.preview_gif_url;
+            if (ld.filename) data.filename = ld.filename;
+            if (ld.frame_count) data.frame_count = ld.frame_count;
+            if (ld.status) data.status = ld.status;
+          }
+        }
+        if (n.type === "video_out" && liveOut?.data) {
+          data.preview_width =
+            (liveOut.data as any).preview_width ?? data.preview_width ?? 420;
+        }
+        return { ...n, data };
+      });
+
+      if (liveIn && liveIn.id !== "video_in") {
+        const vi = recipeNodes.find((n: any) => n.type === "video_in");
+        if (vi) {
+          const oldId = vi.id;
+          vi.id = liveIn.id;
+          vi.position = toGraphPos(liveIn.position);
+          nextEdges = nextEdges.map((e) => ({
+            ...e,
+            source: e.source === oldId ? liveIn.id : e.source,
+            target: e.target === oldId ? liveIn.id : e.target,
+          }));
+        }
+      }
+
+      const graph: Graph = {
+        version: 2,
+        nodes: recipeNodes,
+        edges: nextEdges,
+      };
+      const flow = toFlow(graph, meta);
+      setNodes(flow.nodes);
+      setEdges(flow.edges);
+      setAppMode("kitchen");
+      setStatus(`Loaded video setup · ${recipe.label}`);
+      if (rid && inferStatus === "done") {
+        scheduleEvaluate(flow.nodes, flow.edges, rid);
+      }
+    },
+    [inferStatus, meta, runId, scheduleEvaluate, setEdges, setNodes]
+  );
+
+  const loadArenaKitchens = useCallback(async () => {
+    const url = kitchenUrl.trim();
+    if (!url) {
+      setStatus("Paste an Are.na channel or block with Depth Ledger recipes");
+      return;
+    }
+    setBusy(true);
+    setStatus("Scanning Are.na for kitchens…");
+    try {
+      const res = await fetchArenaKitchens(url);
+      const list = res.kitchens || [];
+      setArenaKitchens(list);
+      if (!list.length) {
+        setKitchenPick("");
+        setStatus("No Depth Ledger recipes found on that link");
+        return;
+      }
+      const first = String(list[0].block_id ?? 0);
+      setKitchenPick(first);
+      applyArenaKitchen(list[0]);
+      setStatus(
+        list.length === 1
+          ? `Loaded kitchen from Are.na · ${list[0].summary || list[0].title}`
+          : `Found ${list.length} kitchens — applied newest; pick another in the dropdown`
+      );
+    } catch (e: any) {
+      setStatus(`Are.na kitchen error: ${e.message}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [applyArenaKitchen, kitchenUrl]);
 
   const patchEdgeData = useCallback(
     (edgeId: string, patch: Partial<BlendEdgeData>) => {
@@ -632,9 +983,21 @@ export default function App() {
   }, [setEdges, setNodes]);
 
   const addNode = useCallback(
-    (type: "look" | "scene" | "blend" | "relief" | "arena" | "arena_out") => {
+    (
+      type:
+        | "look"
+        | "scene"
+        | "blend"
+        | "relief"
+        | "smooth"
+        | "freq_fuse"
+        | "arena"
+        | "arena_out"
+        | "video_in"
+        | "video_out"
+    ) => {
       const id = uid(type);
-      const offset = nodesRef.current.length * 24;
+      const offset = nodesRef.current.length * 24 * LAYOUT_SCALE;
       let data: Record<string, unknown> = {};
       let position = { x: 360 + offset, y: 120 + offset };
       if (type === "look") {
@@ -658,6 +1021,36 @@ export default function App() {
           far_remap: true,
           collapsed: false,
         };
+      } else if (type === "smooth") {
+        const d = meta?.smooth?.defaults;
+        data = {
+          mode: d?.mode ?? "ema",
+          window_mode: d?.window_mode ?? "locked",
+          window_lock: d?.window_lock ?? "first",
+          spline_interval: d?.spline_interval ?? 30,
+          lo_pct: d?.lo_pct ?? 2,
+          hi_pct: d?.hi_pct ?? 98,
+          temporal: d?.temporal ?? "ema",
+          ema_alpha: d?.ema_alpha ?? 0.45,
+          flow_prior: d?.flow_prior ?? 0.75,
+          occ_thresh: d?.occ_thresh ?? 1.5,
+          collapsed: false,
+        };
+        const depth = nodesRef.current.find((n) => n.type === "depth");
+        position = depth
+          ? { x: depth.position.x + 280 * LAYOUT_SCALE, y: depth.position.y }
+          : { x: 320, y: 120 };
+      } else if (type === "freq_fuse") {
+        const d = meta?.freq_fuse?.defaults;
+        data = {
+          beta: d?.beta ?? 1,
+          blur_sigma: d?.blur_sigma ?? 4,
+          collapsed: false,
+        };
+        const depth = nodesRef.current.find((n) => n.type === "depth");
+        position = depth
+          ? { x: depth.position.x + 280 * LAYOUT_SCALE, y: depth.position.y + 40 * LAYOUT_SCALE }
+          : { x: 320, y: 160 };
       } else if (type === "relief") {
         data = {
           gc_alpha: meta?.relief?.default_gc_alpha ?? 10,
@@ -669,8 +1062,25 @@ export default function App() {
         data = { url: "", status: "idle" };
         const depth = nodesRef.current.find((n) => n.type === "depth");
         position = depth
-          ? { x: depth.position.x - 280, y: depth.position.y }
+          ? { x: depth.position.x - 280 * LAYOUT_SCALE, y: depth.position.y }
           : { x: 40, y: 40 };
+      } else if (type === "video_in") {
+        data = { status: "idle" };
+        const depth = nodesRef.current.find((n) => n.type === "depth");
+        position = depth
+          ? { x: depth.position.x - 300 * LAYOUT_SCALE, y: depth.position.y + 40 * LAYOUT_SCALE }
+          : { x: 40, y: 80 };
+      } else if (type === "video_out") {
+        if (nodesRef.current.some((n) => n.type === "video_out")) {
+          setStatus("Video Out already on the canvas");
+          return;
+        }
+        data = { preview_width: 420 };
+        const maxX = Math.max(
+          0,
+          ...nodesRef.current.map((n) => n.position.x)
+        );
+        position = { x: maxX + 280 * LAYOUT_SCALE, y: 40 };
       } else if (type === "arena_out") {
         data = {
           channel_id: "",
@@ -678,10 +1088,13 @@ export default function App() {
           status: "idle",
           batch_count: 5,
           wackiness: 0.45,
+          max_fidelity: false,
         };
-        const output = nodesRef.current.find((n) => n.type === "output");
-        position = output
-          ? { x: output.position.x, y: output.position.y + 280 }
+        const sink =
+          nodesRef.current.find((n) => n.type === "video_out") ||
+          nodesRef.current.find((n) => n.type === "output");
+        position = sink
+          ? { x: sink.position.x, y: sink.position.y + 280 * LAYOUT_SCALE }
           : { x: 1120, y: 320 };
       } else {
         data = { mode: "normal", opacity: 1 };
@@ -699,7 +1112,7 @@ export default function App() {
         node,
       ];
       let nextEdges = edgesRef.current;
-      if (type === "arena") {
+      if (type === "arena" || type === "video_in") {
         const depth = nextNodes.find((n) => n.type === "depth");
         if (depth) {
           const filtered = nextEdges.filter(
@@ -742,16 +1155,87 @@ export default function App() {
           setEdges(nextEdges);
         }
       }
+      if (type === "smooth" || type === "freq_fuse") {
+        const depth = nextNodes.find((n) => n.type === "depth");
+        const look = nextNodes.find((n) => n.type === "look");
+        if (depth) {
+          const byId = new Map(nextNodes.map((n) => [n.id, n]));
+          const fromDepth = nextEdges.filter((e) => e.source === depth.id);
+          const targetId = fromDepth[0]?.target || look?.id || null;
+          let filtered = nextEdges.filter((e) => e.source !== depth.id);
+          if (targetId) {
+            filtered = filtered.filter(
+              (e) => e.target !== targetId || e.source === id
+            );
+          }
+          const toProc: Edge = {
+            id: uid("e"),
+            source: depth.id,
+            target: id,
+            sourceHandle: "out",
+            targetHandle: "in",
+            data: {},
+          };
+          nextEdges = addEdge(annotateEdge(toProc, byId), filtered);
+          if (targetId) {
+            const fromProc: Edge = {
+              id: uid("e"),
+              source: id,
+              target: targetId,
+              sourceHandle: "out",
+              targetHandle: "in",
+              data: {},
+            };
+            nextEdges = addEdge(annotateEdge(fromProc, byId), nextEdges);
+          }
+          setEdges(nextEdges);
+        }
+      }
+      if (type === "video_out") {
+        const plate =
+          nextNodes.find((n) => n.type === "relief") ||
+          nextNodes.find((n) => n.type === "scene") ||
+          nextNodes.find((n) => n.type === "look");
+        if (plate) {
+          const filtered = nextEdges.filter(
+            (e) =>
+              !(
+                e.target === id ||
+                (nextNodes.find((n) => n.id === e.target)?.type === "output" &&
+                  e.source === plate.id)
+              )
+          );
+          const byId = new Map(nextNodes.map((n) => [n.id, n]));
+          const draft: Edge = {
+            id: uid("e"),
+            source: plate.id,
+            target: id,
+            sourceHandle: "out",
+            targetHandle: "in",
+            data: {},
+          };
+          nextEdges = addEdge(annotateEdge(draft, byId), filtered);
+          setEdges(nextEdges);
+        }
+      }
       setNodes(nextNodes);
       setSelectedId(id);
       setStatus(
         type === "arena"
           ? "Added Are.na — paste a link, then → Depth"
-          : type === "arena_out"
+          : type === "video_in"
+            ? "Added Video In — load a clip, arrange, then Infer"
+            : type === "video_out"
+              ? "Added Video Out — scrub / Export MP4 live here"
+            : type === "arena_out"
             ? "Added Are.na Out — pick a channel and Save"
             : type === "relief"
               ? "Added Relief — wire a look/scene plate into it"
-              : `Added ${type} — wire an input, then click the connection to blend`
+              : type === "smooth"
+                ? "Added Smooth — sits after Depth to stabilize video"
+                : type === "freq_fuse"
+                  ? "Added Freq Fuse — stub video low-freq + Depth Pro edges"
+                : `Added ${type} — wire an input, then click the connection to blend`
       );
       scheduleEvaluate(nextNodes, nextEdges, runId);
     },
@@ -766,7 +1250,17 @@ export default function App() {
     setRunId(res.run_id);
     setOutputUrl(res.output_url || res.blend_url || null);
     setRgbUrl(res.rgb_url || null);
+    setPreviewGifUrl(res.preview_gif_url || null);
+    setFrameUrls(res.frame_urls || []);
     setFrameCount(Math.max(1, res.frame_count || 1));
+    setReadyFrames(
+      Math.max(
+        0,
+        res.ready_count ??
+          (res.infer_status === "pending" ? 0 : res.frame_count ?? 1)
+      )
+    );
+    setInferStatus(res.infer_status || "done");
     setFrameIndex(res.frame_index || 0);
     setSampleFps(res.sample_fps || 10);
     setExportUrl(null);
@@ -806,7 +1300,9 @@ export default function App() {
           }${elapsedHint}${coldHint}${costHint}`
     );
     listRuns().then(setRuns).catch(() => undefined);
-    scheduleEvaluate(flow.nodes, flow.edges, res.run_id);
+    if (res.infer_status !== "pending") {
+      scheduleEvaluate(flow.nodes, flow.edges, res.run_id);
+    }
   };
 
   /** Keep kitchen + Are.na sources when feeding a new run from Are.na. */
@@ -820,7 +1316,11 @@ export default function App() {
       setRunId(res.run_id);
       setOutputUrl(res.output_url || res.blend_url || null);
       setRgbUrl(res.rgb_url || null);
+      setPreviewGifUrl(null);
+      setFrameUrls([]);
       setFrameCount(Math.max(1, res.frame_count || 1));
+      setReadyFrames(Math.max(1, res.ready_count ?? res.frame_count ?? 1));
+      setInferStatus(res.infer_status || "done");
       setFrameIndex(res.frame_index || 0);
       setSampleFps(res.sample_fps || 10);
       setExportUrl(null);
@@ -869,7 +1369,7 @@ export default function App() {
           id: arenaNodeId,
           type: "arena",
           position: arenaPrev?.position || {
-            x: (depth?.position.x ?? 40) - 280,
+            x: (depth?.position.x ?? 40) - 280 * LAYOUT_SCALE,
             y: depth?.position.y ?? 120,
           },
           data: mergeArenaNodeData(
@@ -1078,10 +1578,11 @@ export default function App() {
           last_block_id: res.block?.id,
           last_block_url: res.block?.arena_url,
         });
+        const savedTitle = res.title || res.block?.title || res.run_label;
         setStatus(
           res.block?.arena_url
-            ? `Saved to Are.na · ${res.block.arena_url}`
-            : `Saved block #${res.block?.id}`
+            ? `Saved · ${savedTitle || "block"} · ${res.block.arena_url}`
+            : `Saved block #${res.block?.id}${savedTitle ? ` · ${savedTitle}` : ""}`
         );
         void refreshArenaChannels();
       } catch (e: any) {
@@ -1103,12 +1604,16 @@ export default function App() {
       const baseTitle = String((outNode.data as any)?.title || "").trim();
       const count = Math.max(
         1,
-        Math.min(40, Math.round(Number((outNode.data as any)?.batch_count ?? 5)))
+        Math.min(200, Math.round(Number((outNode.data as any)?.batch_count ?? 5)))
       );
       const wackiness = Math.min(
         1,
         Math.max(0, Number((outNode.data as any)?.wackiness ?? 0.45))
       );
+      const maxFidelity = Boolean((outNode.data as any)?.max_fidelity);
+      const rollMaxSize = maxFidelity
+        ? Math.max(...(meta?.max_sizes || [518, 756, 1008]))
+        : maxSize;
 
       if (!channelId) {
         setStatus("Pick an Are.na channel before rolling");
@@ -1130,6 +1635,18 @@ export default function App() {
         error: null,
         batch_i: 0,
         batch_n: count,
+        batch_progress: 0,
+        batch_phase: "download",
+        batch_message: "Starting…",
+        batch_downloaded: 0,
+        batch_inferred: 0,
+        batch_cached: 0,
+        batch_cooked: 0,
+        batch_published: 0,
+        batch_items: Array.from({ length: count }, (_, i) => ({
+          index: i + 1,
+          status: "queued",
+        })),
       });
 
       try {
@@ -1138,25 +1655,39 @@ export default function App() {
           arena_url: arenaUrl,
           count,
           model_key: modelKey,
-          max_size: maxSize,
+          max_size: rollMaxSize,
           infer_backend: inferBackend,
           wackiness,
+          max_fidelity: maxFidelity,
           channel_id: channelId,
           title: baseTitle,
           graph,
         });
         batchJobIdRef.current = job_id;
-        setStatus(`Batch job ${job_id} · ${count} rolls on ${inferBackend}…`);
+        setStatus(
+          `Batch job ${job_id} · ${count} rolls on ${inferBackend}${
+            maxFidelity ? " · max fidelity" : ""
+          }…`
+        );
 
         const job = await pollJob(
           job_id,
           (j) => {
-            const i = Number(j.i || 0);
+            const i = Number(j.published ?? j.i ?? 0);
             const n = Number(j.n || count);
             patchNodeUi(arenaOutId, {
               status: "batching",
               batch_i: i,
               batch_n: n,
+              batch_progress: j.progress ?? 0,
+              batch_phase: j.phase || "pipeline",
+              batch_message: j.message || "",
+              batch_downloaded: j.downloaded ?? 0,
+              batch_inferred: j.inferred ?? 0,
+              batch_cached: j.cached ?? 0,
+              batch_cooked: j.cooked ?? 0,
+              batch_published: j.published ?? i,
+              batch_items: j.items || [],
             });
             if (j.modal_billing) {
               setModalBatchBilling(j.modal_billing);
@@ -1182,7 +1713,7 @@ export default function App() {
                   : "evaluate"
             );
           },
-          600,
+          400,
           () => batchAbortRef.current
         );
 
@@ -1211,8 +1742,17 @@ export default function App() {
           status: job.status === "error" ? "error" : "ready",
           error: job.status === "error" ? job.error || job.message : null,
           last_block_url: lastUrl,
-          batch_i: count,
+          batch_i: saved,
           batch_n: count,
+          batch_progress: 1,
+          batch_phase: "done",
+          batch_message: job.message || "",
+          batch_downloaded: job.downloaded ?? count,
+          batch_inferred: job.inferred ?? count,
+          batch_cached: job.cached ?? 0,
+          batch_cooked: job.cooked ?? saved,
+          batch_published: job.published ?? saved,
+          batch_items: job.items || [],
         });
         setStatus(
           job.status === "cancelled"
@@ -1294,42 +1834,378 @@ export default function App() {
     }
   };
 
-  const onGenerateVideo = async (file: File) => {
-    setBusy(true);
-    setPlaying(false);
-    setProgress("upload");
-    setVideoProgress(0);
-    setStatus("Uploading video…");
-    try {
-      setProgress("infer");
-      setStatus(`Starting Depth Pro video on ${inferBackend}…`);
-      // Force Depth Pro for RGB video
-      const key = modelKey.startsWith("promptda") ? "depth-pro" : modelKey;
-      if (key !== modelKey) setModelKey(key);
-      const { job_id } = await startVideoInfer(file, key, maxSize, inferBackend);
-      const res = await pollVideoJob(job_id, (job) => {
-        setVideoProgress(job.progress ?? 0);
-        setStatus(job.message || `Video ${Math.round((job.progress || 0) * 100)}%`);
-        if (job.modal_usage?.cost_usd != null) {
-          setModalSessionCost(Number(job.modal_usage.cost_usd));
-        }
+  const prepareVideoNode = useCallback(
+    async (nodeId: string, file: File) => {
+      setBusy(true);
+      setPlaying(false);
+      setProgress("upload");
+      setFrameUrls([]);
+      setExportUrl(null);
+      patchNodeUi(nodeId, {
+        status: "preparing",
+        error: null,
+        filename: file.name,
       });
-      applyInfer(res, meta);
-      setVideoProgress(null);
-    } catch (e: any) {
-      setStatus(`Video error: ${e.message}`);
-      setVideoProgress(null);
-    } finally {
-      setBusy(false);
-      setProgress(null);
-    }
-  };
+      setStatus(`Preparing ${file.name}…`);
+      try {
+        const key = modelKey.startsWith("promptda") ? "depth-pro" : modelKey;
+        if (key !== modelKey) setModelKey(key);
+        const res = await prepareVideo(file, key, maxSize, inferBackend);
+        setRunId(res.run_id);
+        setRgbUrl(res.rgb_url || null);
+        setPreviewGifUrl(res.preview_gif_url || null);
+        setOutputUrl(res.preview_gif_url || null);
+        setFrameCount(Math.max(1, res.frame_count || 1));
+        setReadyFrames(0);
+        setReadyIndices([]);
+        setInferStatus("pending");
+        setInferMode(null);
+        if (res.frame_width) setFrameWidth(Number(res.frame_width));
+        if (res.frame_height) setFrameHeight(Number(res.frame_height));
+        setFrameIndex(0);
+        setSampleFps(res.sample_fps || 10);
+        setFrameUrls([]);
+        setEvalToken(Date.now());
 
+        const hasKitchen = nodesRef.current.some((n) => n.type === "depth");
+        if (!hasKitchen) {
+          const flow = toFlow(res.graph, meta);
+          const patched = flow.nodes.map((n) => {
+            if (n.type !== "video_in") return n;
+            return {
+              ...n,
+              id: n.id === "video_in" ? nodeId : n.id,
+              data: {
+                ...(n.data as Record<string, unknown>),
+                status: "pending",
+                run_id: res.run_id,
+                source_url: res.source_url,
+                preview_gif_url: res.preview_gif_url,
+                frame_count: res.frame_count,
+                frame_width: res.frame_width,
+                frame_height: res.frame_height,
+                max_size: res.max_size ?? maxSize,
+                filename: file.name,
+                error: null,
+              },
+              deletable: true,
+            };
+          });
+          // If prepare was triggered from a canvas video_in with a custom id,
+          // remap edges that pointed at "video_in".
+          const edges = flow.edges.map((e) =>
+            e.source === "video_in" && nodeId !== "video_in"
+              ? { ...e, source: nodeId }
+              : e
+          );
+          const byId = new Map(patched.map((n) => [n.id, n]));
+          setNodes(patched);
+          setEdges(edges.map((e) => annotateEdge(e, byId)));
+        } else {
+          setNodes((nds) =>
+            nds.map((n) => {
+              if (n.type === "depth") {
+                return {
+                  ...n,
+                  data: {
+                    ...n.data,
+                    run_id: res.run_id,
+                    infer_backend: res.infer_backend,
+                  },
+                };
+              }
+              if (n.id === nodeId) {
+                return {
+                  ...n,
+                  data: {
+                    ...n.data,
+                    status: "pending",
+                    run_id: res.run_id,
+                    source_url: res.source_url,
+                    preview_gif_url: res.preview_gif_url,
+                    frame_count: res.frame_count,
+                    frame_width: res.frame_width,
+                    frame_height: res.frame_height,
+                    max_size: res.max_size ?? maxSize,
+                    filename: file.name,
+                    error: null,
+                  },
+                };
+              }
+              return n;
+            })
+          );
+        }
+
+        // Ensure Video In → Depth edge exists
+        setEdges((eds) => {
+          const depth = nodesRef.current.find((n) => n.type === "depth");
+          if (!depth) return eds;
+          if (eds.some((e) => e.source === nodeId && e.target === depth.id)) {
+            return eds;
+          }
+          const filtered = eds.filter(
+            (e) =>
+              !(e.target === depth.id && (e.targetHandle ?? null) === "in")
+          );
+          const byId = new Map(nodesRef.current.map((n) => [n.id, n]));
+          const draft: Edge = {
+            id: uid("e"),
+            source: nodeId,
+            target: depth.id,
+            sourceHandle: "out",
+            targetHandle: "in",
+            data: {},
+          };
+          return addEdge(annotateEdge(draft, byId), filtered);
+        });
+        setStatus(
+          `Prepared ${res.frame_count} frames · arrange kitchen, then Infer`
+        );
+        listRuns().then(setRuns).catch(() => undefined);
+      } catch (e: any) {
+        patchNodeUi(nodeId, { status: "error", error: e.message });
+        setStatus(`Prepare error: ${e.message}`);
+      } finally {
+        setBusy(false);
+        setProgress(null);
+      }
+    },
+    [inferBackend, maxSize, meta, modelKey, patchNodeUi, setEdges, setNodes]
+  );
+
+  const inferVideoRun = useCallback(
+    async () => {
+      const videoIn = nodesRef.current.find((n) => n.type === "video_in");
+      const d = (videoIn?.data || {}) as Record<string, unknown>;
+      const rid = String(d.run_id || runId || "");
+      if (!rid) {
+        setStatus("Load a video on Video In first");
+        return;
+      }
+      setBusy(true);
+      setPlaying(false);
+      setProgress("infer");
+      setVideoProgress(0);
+      setFrameUrls([]);
+      setReadyIndices([]);
+      setFrameStatusExpanded(true);
+      if (videoIn) {
+        patchNodeUi(videoIn.id, { status: "inferring", error: null });
+      }
+      setInferStatus("running");
+      setInferMode(
+        inferBackend === "modal" ? "modal_parallel" : "local_sequential"
+      );
+      setStatus(
+        inferBackend === "modal"
+          ? "Modal · parallel Depth Pro across frames…"
+          : "Local · sequential Depth Pro frame-by-frame…"
+      );
+      let openedPreview = false;
+      try {
+        const key = modelKey.startsWith("promptda") ? "depth-pro" : modelKey;
+        if (key !== modelKey) setModelKey(key);
+        const { job_id } = await startPreparedInfer(rid, {
+          model_key: key,
+          max_size: maxSize,
+          infer_backend: inferBackend,
+        });
+        const res = await pollVideoJob(
+          job_id,
+          (job) => {
+            setVideoProgress(job.progress ?? 0);
+            const ready = job.ready_frames ?? job.result?.ready_count;
+            const total = job.total_frames ?? job.result?.frame_count;
+            if (ready != null) setReadyFrames(Math.max(0, Number(ready)));
+            if (total != null) setFrameCount(Math.max(1, Number(total)));
+            if (job.ready_indices) {
+              setReadyIndices(job.ready_indices.map(Number));
+            } else if (ready != null) {
+              setReadyIndices(
+                Array.from({ length: Number(ready) }, (_, i) => i)
+              );
+            }
+            if (job.infer_mode) setInferMode(String(job.infer_mode));
+            if (job.result?.infer_status) {
+              setInferStatus(String(job.result.infer_status));
+            } else if (job.status === "running") {
+              setInferStatus("running");
+            }
+            if (job.result?.preview_gif_url) {
+              setPreviewGifUrl(String(job.result.preview_gif_url));
+            }
+            if (job.result?.frame_width) {
+              setFrameWidth(Number(job.result.frame_width));
+            }
+            if (job.result?.frame_height) {
+              setFrameHeight(Number(job.result.frame_height));
+            }
+            setStatus(
+              job.message ||
+                (ready != null && total != null
+                  ? `Depth ${ready}/${total}…`
+                  : `Video ${Math.round((job.progress || 0) * 100)}%`)
+            );
+            if (job.modal_usage?.cost_usd != null) {
+              setModalSessionCost(Number(job.modal_usage.cost_usd));
+            }
+          },
+          (preview) => {
+            openedPreview = true;
+            setRunId(preview.run_id);
+            setRgbUrl(preview.rgb_url || null);
+            setOutputUrl(preview.output_url || preview.blend_url || null);
+            setPreviewGifUrl(preview.preview_gif_url || previewGifUrl);
+            setReadyFrames(Math.max(1, preview.ready_count ?? 1));
+            setFrameCount(Math.max(1, preview.frame_count || 1));
+            setInferStatus(preview.infer_status || "running");
+            if (preview.ready_indices) {
+              setReadyIndices(preview.ready_indices.map(Number));
+            }
+            if (preview.infer_mode) setInferMode(preview.infer_mode);
+            if (preview.frame_width) setFrameWidth(preview.frame_width);
+            if (preview.frame_height) setFrameHeight(preview.frame_height);
+            setNodes((nds) =>
+              nds.map((n) =>
+                n.type === "depth"
+                  ? {
+                      ...n,
+                      data: {
+                        ...n.data,
+                        run_id: preview.run_id,
+                        infer_backend: preview.infer_backend,
+                        infer_device: preview.infer_device,
+                        modal_cost: preview.modal_billing?.cost_usd,
+                      },
+                    }
+                  : n
+              )
+            );
+            setBusy(false);
+            setProgress(null);
+            scheduleEvaluate(
+              nodesRef.current,
+              edgesRef.current,
+              preview.run_id
+            );
+            setStatus(
+              `Preview ready · inferring ${preview.ready_count ?? 1}/${preview.frame_count ?? "?"}…`
+            );
+          }
+        );
+        setRunId(res.run_id);
+        setRgbUrl(res.rgb_url || null);
+        setPreviewGifUrl(res.preview_gif_url || previewGifUrl);
+        setFrameCount(Math.max(1, res.frame_count || 1));
+        setReadyFrames(Math.max(1, res.ready_count ?? res.frame_count ?? 1));
+        setReadyIndices(
+          (res.ready_indices || Array.from(
+            { length: res.frame_count || 1 },
+            (_, i) => i
+          )).map(Number)
+        );
+        if (res.infer_mode) setInferMode(res.infer_mode);
+        if (res.frame_width) setFrameWidth(res.frame_width);
+        if (res.frame_height) setFrameHeight(res.frame_height);
+        setInferStatus("done");
+        inferStatusRef.current = "done";
+        readyFramesRef.current = Math.max(
+          1,
+          res.ready_count ?? res.frame_count ?? 1
+        );
+        frameCountRef.current = Math.max(1, res.frame_count || 1);
+        applyModalBilling(res);
+        setNodes((nds) =>
+          nds.map((n) => {
+            if (n.type === "depth") {
+              return {
+                ...n,
+                data: {
+                  ...n.data,
+                  run_id: res.run_id,
+                  infer_backend: res.infer_backend,
+                  infer_device: res.infer_device,
+                  modal_cost: res.modal_billing?.cost_usd,
+                },
+              };
+            }
+            if (n.type === "video_in") {
+              return {
+                ...n,
+                data: {
+                  ...n.data,
+                  status: "done",
+                  run_id: res.run_id,
+                  source_url: res.source_url || d.source_url,
+                  frame_count: res.frame_count,
+                  frame_width: res.frame_width,
+                  frame_height: res.frame_height,
+                  error: null,
+                },
+              };
+            }
+            return n;
+          })
+        );
+        setVideoProgress(null);
+        scheduleEvaluate(nodesRef.current, edgesRef.current, res.run_id, {
+          bake: true,
+        });
+        setStatus(`Video run ${res.run_id} · ${res.frame_count} frames ready`);
+        listRuns().then(setRuns).catch(() => undefined);
+        void openedPreview;
+      } catch (e: any) {
+        if (videoIn) {
+          patchNodeUi(videoIn.id, { status: "error", error: e.message });
+        }
+        setStatus(`Video error: ${e.message}`);
+        setVideoProgress(null);
+        setInferStatus("pending");
+      } finally {
+        setBusy(false);
+        setProgress(null);
+      }
+    },
+    [
+      applyModalBilling,
+      inferBackend,
+      maxSize,
+      modelKey,
+      patchNodeUi,
+      previewGifUrl,
+      runId,
+      scheduleEvaluate,
+      setNodes,
+    ]
+  );
+
+  const scrubMax = Math.max(
+    1,
+    Math.min(Math.max(readyFrames, frameUrls.length || 0), frameCount)
+  );
+
+  /** Local Output scrub — swaps pre-baked frames only (no kitchen reload). */
+  const scrubFrame = useCallback(
+    (index: number) => {
+      if (frameCount <= 1) return;
+      const maxIdx = Math.max(0, scrubMax - 1);
+      const i = Math.max(0, Math.min(maxIdx, index));
+      setFrameIndex(i);
+      if (frameUrls[i]) {
+        setOutputUrl(frameUrls[i]);
+      }
+    },
+    [frameCount, frameUrls, scrubMax]
+  );
+
+  /** Operator / legacy: reload kitchen onto a frame (still used by OperatorView). */
   const goToFrame = useCallback(
     async (index: number) => {
       if (!runId || frameCount <= 1) return;
       if (seekingRef.current) return;
-      const i = Math.max(0, Math.min(frameCount - 1, index));
+      const maxIdx = Math.max(0, scrubMax - 1);
+      const i = Math.max(0, Math.min(maxIdx, index));
       seekingRef.current = true;
       try {
         const res = await setRunFrame(
@@ -1349,11 +2225,11 @@ export default function App() {
         seekingRef.current = false;
       }
     },
-    [frameCount, runId]
+    [frameCount, runId, scrubMax]
   );
 
   useEffect(() => {
-    if (!playing || frameCount <= 1) {
+    if (!playing || scrubMax <= 1) {
       if (playTimer.current) {
         window.clearInterval(playTimer.current);
         playTimer.current = null;
@@ -1363,10 +2239,10 @@ export default function App() {
     const ms = Math.max(40, Math.round(1000 / Math.max(sampleFps, 1)));
     playTimer.current = window.setInterval(() => {
       const next =
-        frameIndexRef.current + 1 >= frameCount
+        frameIndexRef.current + 1 >= scrubMax
           ? 0
           : frameIndexRef.current + 1;
-      void goToFrame(next);
+      scrubFrame(next);
     }, ms);
     return () => {
       if (playTimer.current) {
@@ -1374,9 +2250,9 @@ export default function App() {
         playTimer.current = null;
       }
     };
-  }, [playing, frameCount, sampleFps, goToFrame]);
+  }, [playing, scrubMax, sampleFps, scrubFrame]);
 
-  const onExportVideo = async () => {
+  const onExportVideo = useCallback(async () => {
     if (!runId || frameCount <= 1) return;
     setBusy(true);
     setProgress("evaluate");
@@ -1394,7 +2270,7 @@ export default function App() {
       setBusy(false);
       setProgress(null);
     }
-  };
+  }, [frameCount, runId]);
 
   const isValidConnection = useCallback((connection: Connection | Edge) => {
     const { source, target, targetHandle } = connection;
@@ -1403,31 +2279,47 @@ export default function App() {
     const tgt = nodesRef.current.find((n) => n.id === target);
     if (!src || !tgt) return false;
 
-    if (tgt.type === "output") {
+    if (tgt.type === "output" || tgt.type === "video_out") {
       return (
         src.type !== "depth" &&
+        src.type !== "smooth" &&
+        src.type !== "freq_fuse" &&
         src.type !== "output" &&
+        src.type !== "video_out" &&
         src.type !== "arena" &&
-        src.type !== "arena_out"
+        src.type !== "arena_out" &&
+        src.type !== "video_in"
       );
     }
     if (tgt.type === "blend") {
       return (
         (targetHandle === "base" || targetHandle === "overlay") &&
         src.type !== "depth" &&
+        src.type !== "smooth" &&
+        src.type !== "freq_fuse" &&
         src.type !== "output" &&
+        src.type !== "video_out" &&
         src.type !== "arena" &&
-        src.type !== "arena_out"
+        src.type !== "arena_out" &&
+        src.type !== "video_in"
       );
     }
     if (tgt.type === "look" || tgt.type === "scene") {
-      // Single input: depth or any image plate.
       return (
         src.type === "depth" ||
+        src.type === "smooth" ||
+        src.type === "freq_fuse" ||
         src.type === "look" ||
         src.type === "scene" ||
         src.type === "blend" ||
         src.type === "relief"
+      );
+    }
+    if (tgt.type === "smooth" || tgt.type === "freq_fuse") {
+      return (
+        src.type === "depth" ||
+        src.type === "smooth" ||
+        src.type === "freq_fuse"
       );
     }
     if (tgt.type === "relief") {
@@ -1439,7 +2331,7 @@ export default function App() {
       );
     }
     if (tgt.type === "depth") {
-      return src.type === "arena";
+      return src.type === "arena" || src.type === "video_in";
     }
     if (tgt.type === "arena_out") {
       return (
@@ -1447,7 +2339,8 @@ export default function App() {
         src.type === "scene" ||
         src.type === "blend" ||
         src.type === "relief" ||
-        src.type === "output"
+        src.type === "output" ||
+        src.type === "video_out"
       );
     }
     return false;
@@ -1752,11 +2645,29 @@ export default function App() {
       busy,
       modelKey,
       maxSize,
+      setMaxSize,
       inferBackend,
       modalSessionCost,
       inferDevice,
       runId,
       frameIndex,
+      frameCount,
+      readyFrames,
+      readyIndices,
+      inferMode,
+      frameWidth,
+      frameHeight,
+      sampleFps,
+      inferStatus,
+      previewGifUrl,
+      frameUrls,
+      exportUrl,
+      frameStatusExpanded,
+      setFrameStatusExpanded,
+      playing,
+      setPlaying,
+      scrubFrame,
+      exportVideo: onExportVideo,
       arenaChannels,
       arenaAuth,
       windowTune,
@@ -1768,11 +2679,12 @@ export default function App() {
       startWindowTune,
       stopWindowTune,
       setWindowTuneMode,
-      setWindowTuneSurface,
       applyWindowPct,
       commitWindowTune,
       resolveArenaNode,
       loadArenaIntoDepth,
+      prepareVideoNode,
+      inferVideoRun,
       refreshArenaChannels,
       publishArenaOut,
       runArenaBatch,
@@ -1793,6 +2705,21 @@ export default function App() {
       inferDevice,
       runId,
       frameIndex,
+      frameCount,
+      readyFrames,
+      readyIndices,
+      inferMode,
+      frameWidth,
+      frameHeight,
+      sampleFps,
+      inferStatus,
+      previewGifUrl,
+      frameUrls,
+      exportUrl,
+      frameStatusExpanded,
+      playing,
+      scrubFrame,
+      onExportVideo,
       arenaChannels,
       arenaAuth,
       windowTune,
@@ -1804,11 +2731,12 @@ export default function App() {
       startWindowTune,
       stopWindowTune,
       setWindowTuneMode,
-      setWindowTuneSurface,
       applyWindowPct,
       commitWindowTune,
       resolveArenaNode,
       loadArenaIntoDepth,
+      prepareVideoNode,
+      inferVideoRun,
       refreshArenaChannels,
       publishArenaOut,
       runArenaBatch,
@@ -1818,13 +2746,15 @@ export default function App() {
 
   const modalData = (modalEdge?.data || {}) as BlendEdgeData;
   const modalBlendable = Boolean(modalData.blendable);
+  const maxSizesList = meta?.max_sizes || [518, 756, 1008, 1536];
+  const maxRes = Math.max(...maxSizesList);
 
   return (
     <KitchenContext.Provider value={kitchenValue}>
       <div className="app">
         <header className="topbar">
           <h1>Depth Ledger</h1>
-          <div className="infer-toggle" title="Kitchen node graph vs Operator synthesizer">
+          <div className="infer-toggle" title="Kitchen, Operator, Video, or a stills batch">
             <span className="infer-toggle-label">Mode</span>
             <div className="infer-seg">
               <button
@@ -1840,6 +2770,26 @@ export default function App() {
                 onClick={() => setAppMode("operator")}
               >
                 Operator
+              </button>
+              <button
+                type="button"
+                className={appMode === "video" ? "active" : ""}
+                onClick={() => {
+                  setAppMode("video");
+                  if (modelKey.startsWith("promptda")) setModelKey("depth-pro");
+                }}
+              >
+                Video
+              </button>
+              <button
+                type="button"
+                className={appMode === "batch" ? "active" : ""}
+                onClick={() => {
+                  setAppMode("batch");
+                  if (modelKey.startsWith("promptda")) setModelKey("depth-pro");
+                }}
+              >
+                Batch
               </button>
             </div>
           </div>
@@ -1863,13 +2813,23 @@ export default function App() {
               value={maxSize}
               onChange={(e) => setMaxSize(parseInt(e.target.value, 10))}
             >
-              {(meta?.max_sizes || [518, 756, 1008]).map((n) => (
+              {maxSizesList.map((n) => (
                 <option key={n} value={n}>
                   {n}
                 </option>
               ))}
             </select>
           </label>
+          {appMode === "video" || appMode === "batch" ? (
+            <button
+              type="button"
+              disabled={busy || maxSize === maxRes}
+              title={`Use Depth Pro native max (${maxRes})`}
+              onClick={() => setMaxSize(maxRes)}
+            >
+              Max res
+            </button>
+          ) : null}
           <div
             className="infer-toggle"
             title={
@@ -1927,6 +2887,8 @@ export default function App() {
               </span>
             </span>
           ) : null}
+          {appMode !== "video" && appMode !== "batch" ? (
+            <>
           <button
             className="primary"
             disabled={busy}
@@ -1938,12 +2900,15 @@ export default function App() {
             Generate Zip
           </button>
           <button
-            disabled={busy}
-            onClick={() => fileVideo.current?.click()}
-            title="RGB video → Depth Pro per frame (max ~60 frames @ ~10fps)"
+            type="button"
+            disabled={busy || !runId}
+            onClick={() => void openBlender()}
+            title="Export float EXR + near/far, then open DepthLedger_v1.blend with this run loaded"
           >
-            Generate Video
+            Open in Blender
           </button>
+            </>
+          ) : null}
           <input
             ref={fileRgb}
             type="file"
@@ -1966,23 +2931,16 @@ export default function App() {
               e.target.value = "";
             }}
           />
-          <input
-            ref={fileVideo}
-            type="file"
-            accept="video/mp4,video/quicktime,video/webm,video/*"
-            hidden
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) onGenerateVideo(f);
-              e.target.value = "";
-            }}
-          />
           <label>
             History
             <select
               value=""
+              disabled={appMode === "batch"}
               onChange={(e) => {
-                if (e.target.value) loadHistory(e.target.value);
+                const id = e.target.value;
+                if (!id) return;
+                if (appMode === "video") setFilmHistoryId(id);
+                else if (appMode !== "batch") loadHistory(id);
               }}
             >
               <option value="">Recent runs…</option>
@@ -1993,22 +2951,82 @@ export default function App() {
               ))}
             </select>
           </label>
-          <button
-            disabled={busy || nodes.length === 0 || appMode !== "kitchen"}
-            onClick={() => saveAsDefault()}
-            title="Use this node layout for every new generate"
+          {appMode === "kitchen" ? (
+          <>
+          <div
+            className="arena-kitchen-load"
+            title="Paste an Are.na channel or block that has Depth Ledger recipes embedded"
           >
-            Save as default
+            <input
+              type="text"
+              placeholder="Are.na channel / block…"
+              value={kitchenUrl}
+              disabled={busy || appMode !== "kitchen"}
+              onChange={(e) => setKitchenUrl(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void loadArenaKitchens();
+              }}
+            />
+            <button
+              type="button"
+              disabled={busy || appMode !== "kitchen" || !kitchenUrl.trim()}
+              onClick={() => void loadArenaKitchens()}
+            >
+              Load kitchen
+            </button>
+            {arenaKitchens.length > 1 ? (
+              <select
+                value={kitchenPick}
+                disabled={busy}
+                onChange={(e) => {
+                  const id = e.target.value;
+                  setKitchenPick(id);
+                  const entry = arenaKitchens.find(
+                    (k) => String(k.block_id) === id
+                  );
+                  if (entry) applyArenaKitchen(entry);
+                }}
+              >
+                {arenaKitchens.map((k) => (
+                  <option key={String(k.block_id)} value={String(k.block_id)}>
+                    {(k.run_name || k.title || `#${k.block_id}`).slice(0, 48)}
+                    {k.summary ? ` · ${k.summary.slice(0, 40)}` : ""}
+                  </option>
+                ))}
+              </select>
+            ) : null}
+          </div>
+          <button
+            disabled={busy || nodes.length === 0}
+            onClick={() => saveAsDefault()}
+            title={
+              graphKind === "video"
+                ? "Use this node layout for every new video generate"
+                : "Use this node layout for every new generate"
+            }
+          >
+            {graphKind === "video" ? "Save as video default" : "Save as default"}
           </button>
-          {hasCustomDefault && appMode === "kitchen" ? (
+          {activeHasCustomDefault ? (
             <button
               disabled={busy}
               onClick={() => resetDefault()}
-              title="Clear custom default kitchen"
+              title={
+                graphKind === "video"
+                  ? "Clear custom video kitchen"
+                  : "Clear custom default kitchen"
+              }
             >
-              Reset default
+              {graphKind === "video" ? "Reset video default" : "Reset default"}
             </button>
           ) : null}
+          </>
+          ) : null}
+          <StatusStrip
+            mode={appMode}
+            runId={runId}
+            lastEvaluateAt={lastEvaluateAt}
+          />
           <span className="status">
             {videoProgress != null
               ? `${status} (${Math.round(videoProgress * 100)}%)`
@@ -2016,7 +3034,30 @@ export default function App() {
           </span>
         </header>
 
-        {appMode === "operator" ? (
+        {appMode === "video" ? (
+          <VideoView
+            meta={meta}
+            modelKey={modelKey}
+            maxSize={maxSize}
+            setMaxSize={setMaxSize}
+            inferBackend={inferBackend}
+            historyRunId={filmHistoryId}
+            onStatus={setStatus}
+            onProgress={setVideoProgress}
+            onBusy={setBusy}
+          />
+        ) : appMode === "batch" ? (
+          <BatchView
+            meta={meta}
+            modelKey={modelKey}
+            maxSize={maxSize}
+            setMaxSize={setMaxSize}
+            inferBackend={inferBackend}
+            onStatus={setStatus}
+            onProgress={setVideoProgress}
+            onBusy={setBusy}
+          />
+        ) : appMode === "operator" ? (
           <OperatorView
             meta={meta}
             runId={runId}
@@ -2047,14 +3088,6 @@ export default function App() {
             addNode={addNode}
             deleteNode={deleteNode}
             inspector={inspector}
-            frameCount={frameCount}
-            frameIndex={frameIndex}
-            sampleFps={sampleFps}
-            playing={playing}
-            setPlaying={setPlaying}
-            goToFrame={goToFrame}
-            onExportVideo={onExportVideo}
-            exportUrl={exportUrl}
             modalEdge={modalEdge}
             modalBlendable={modalBlendable}
             modalData={modalData}
@@ -2065,6 +3098,8 @@ export default function App() {
             setLightbox={setLightbox}
             protectedTypes={PROTECTED_TYPES}
             meta={meta}
+            videoRecipes={videoRecipes}
+            applyVideoRecipe={applyVideoRecipe}
           />
         )}
       </div>

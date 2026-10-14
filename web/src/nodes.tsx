@@ -1181,10 +1181,13 @@ export function OutputNode({ id, data, selected }: NodeProps) {
     patchNodeUi,
     openLightbox,
     frameCount,
+    runId,
   } = useKitchen();
   const width = Math.min(720, Math.max(240, Number(d.preview_width ?? 420)));
   const isVideo = frameCount > 1;
   const src = outputUrl ? bust(outputUrl, evalToken) : null;
+  const npzHref =
+    runId && src ? bust(`/api/runs/${runId}/export/npz`, evalToken) : null;
 
   return (
     <Shell title="Output" selected={selected} wide>
@@ -1227,6 +1230,16 @@ export function OutputNode({ id, data, selected }: NodeProps) {
           {src && !isVideo ? (
             <a href={src} download className="dl-output-dl">
               Download
+            </a>
+          ) : null}
+          {npzHref && !isVideo ? (
+            <a
+              href={npzHref}
+              download
+              className="dl-output-dl"
+              title="Float32 depth (m), inv_smooth, valid mask, rgb + output plates"
+            >
+              NPZ
             </a>
           ) : null}
         </div>

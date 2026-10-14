@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "description": "Map Depth Ledger Kitchen graph edges to Blender 5.2 compositor Mix nodes",
+  "default_still_chain": [
+    {"node": "look_a", "type": "look", "preset": "ledger", "gamma": 0.85},
+    {
+      "edge": "soft_light",
+      "opacity": 0.55,
+      "blender_mix": {"data_type": "RGBA", "blend_type": "SOFT_LIGHT", "factor": 0.55}
+    },
+    {"node": "look_b", "type": "look", "preset": "sockets", "gamma": 1.0},
+    {
+      "edge": "screen",
+      "opacity": 0.45,
+      "blender_mix": {"data_type": "RGBA", "blend_type": "SCREEN", "factor": 0.45}
+    },
+    {
+      "node": "scene",
+      "type": "scene",
+      "mode": "smart",
+      "protect": 0.22,
+      "feather": 0.35,
+      "blender": "DL_Matte + baked matte EXR when mode=smart"
+    },
+    {
+      "node": "relief",
+      "type": "relief",
+      "blender": "API {run}_relief.png into compositor, or DL_Displace for creative 3D"
+    },
+    {"node": "output", "type": "output", "blender": "CompositorNodeOutputFile / Viewer"}
+  ],
+  "blend_mode_map": {
+    "normal": "MIX",
+    "multiply": "MULTIPLY",
+    "screen": "SCREEN",
+    "overlay": "OVERLAY",
+    "soft_light": "SOFT_LIGHT",
+    "hard_light": "OVERLAY",
+    "darken": "DARKEN",
+    "lighten": "LIGHTEN",
+    "difference": "DIFFERENCE"
+  },
+  "notes": [
+    "Pegtop soft-light in depth_core may differ slightly from Blender SOFT_LIGHT — A/B against Kitchen plates.",
+    "hard_light has no Blender Mix enum in 5.2 unified Mix; mapped to OVERLAY as approximation.",
+    "Looks: Shader group DL_Look with Near_m/Far_m from near_far.json presets.",
+    "Smart matte stays Python — export keep-matte EXR and set DL_Matte.UseBaked=1."
+  ]
+}

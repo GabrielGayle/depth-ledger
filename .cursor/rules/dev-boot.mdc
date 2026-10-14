@@ -1,0 +1,31 @@
+---
+description: Auto-boot / restart the local Depth Ledger stack after changes — do not wait for the user to say "run"
+alwaysApply: true
+---
+
+# Dev boot
+
+After changes that need a running app (API, web UI, routes, styles, depth_core), **ensure the stack is up yourself** — do not ask the user to run servers or wait for a "run" prompt.
+
+## Commands
+
+| Goal | Command |
+|------|---------|
+| Start if needed | `make boot` |
+| Full recycle (port fights / hung uvicorn) | `make restart` |
+| Fast iterate (skip model warmup) | `make boot-fast` |
+| Check | `make status` |
+| Stop | `make down` |
+
+Prefer `make boot` / `make restart` over separate `make api` + `make web`.
+
+## When to restart
+
+- **Vite/React/CSS only**: HMR usually covers it; only `make boot` if `:5173` is down.
+- **Python (`server/`, `depth_core/`)**: uvicorn `--reload` usually covers it; if the API is dead, port-stuck, or OOM-killed → `make restart` (or `make boot-fast` while iterating).
+- After fixing a boot/proxy error (`ECONNREFUSED`, `ETIMEDOUT`, `Address already in use`) → `make restart`, then verify with `make status` or curl.
+
+## Do not
+
+- Leave the user with "run `make api` in another terminal" as the only next step when you can boot it.
+- Spawn duplicate uvicorn/vite without freeing ports first (`scripts/dev.sh` handles that).

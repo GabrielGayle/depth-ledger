@@ -215,6 +215,40 @@ def export_relief_png(
     return path
 
 
+def export_npz(
+    out_dir: Path | str,
+    run_id: str,
+    depth_m: np.ndarray,
+    *,
+    rgb: Optional[np.ndarray] = None,
+    output: Optional[np.ndarray] = None,
+    cliff: Optional[float] = None,
+    preset: str = "ledger",
+) -> Path:
+    """Write `{run}_export.npz`: float depth (m), inv_smooth, valid mask, plates, window."""
+    out_dir = Path(out_dir)
+    depth = np.asarray(depth_m, dtype=np.float32)
+    _, inv = _prepare_inv_smooth(depth)
+    if cliff is None:
+        cliff = float(_subject_hi_pct(depth))
+    nf = near_far_for_preset(depth, preset, cliff=cliff)
+    arrays: dict[str, np.ndarray] = {
+        "depth": depth,
+        "inv_smooth": np.asarray(inv, dtype=np.float32),
+        "valid": depth_valid_mask(depth),
+        "near_m": np.float32(nf["near_m"]),
+        "far_m": np.float32(nf["far_m"]),
+        "cliff": np.float32(cliff),
+    }
+    if rgb is not None:
+        arrays["rgb"] = np.asarray(rgb, dtype=np.uint8)
+    if output is not None:
+        arrays["output"] = np.asarray(output, dtype=np.uint8)
+    path = out_dir / f"{run_id}_export.npz"
+    np.savez_compressed(path, **arrays)
+    return path
+
+
 def export_frame_sequence_meta(
     out_dir: Path | str,
     run_id: str,

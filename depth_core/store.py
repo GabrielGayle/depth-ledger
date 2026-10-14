@@ -47,6 +47,7 @@ _COMPACT_DELETE_GLOBS = (
     "*_matte.exr",
     "*_depth.exr",
     "*_inv_smooth.exr",
+    "*_export.npz",
 )
 
 _PROTECTED_DIR_PREFIX = "_"
